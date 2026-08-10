@@ -32,13 +32,13 @@
 默认 WebUI 端口 `8766`：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kikisozi/active-ip-sniffer/main/install.sh | sudo bash
+curl -fsSL "https://github.com/kikisozi/active-ip-sniffer/raw/refs/heads/main/install.sh?cb=$(date +%s)" | sudo bash
 ```
 
 指定端口，例如 `18080`：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kikisozi/active-ip-sniffer/main/install.sh | sudo bash -s -- 18080
+curl -fsSL "https://github.com/kikisozi/active-ip-sniffer/raw/refs/heads/main/install.sh?cb=$(date +%s)" | sudo bash -s -- 18080
 ```
 
 安装脚本根据 CPU 自动下载：
@@ -47,6 +47,8 @@ curl -fsSL https://raw.githubusercontent.com/kikisozi/active-ip-sniffer/main/ins
 - `dist/active-ip-sniffer-linux-arm64`
 
 因此低配 VPS **不会现场安装 Go 或进行编译**。
+
+安装脚本会先通过 GitHub API 解析 `main` 当前精确 commit SHA，再从同一个 commit 下载二进制和 `SHA256SUMS` 并强制校验，从而避免分支 raw CDN 短时缓存造成版本混用。
 
 安装位置：
 
