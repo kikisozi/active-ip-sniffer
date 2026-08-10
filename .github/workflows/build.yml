@@ -26,31 +26,6 @@ jobs:
         with:
           go-version: "1.22.x"
 
-      - name: Repair synchronized WebUI literals
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          path = Path("main.go")
-          lines = path.read_text(encoding="utf-8").splitlines()
-          replacements = {
-              "function render(x)": r'''function render(x){const items=x.results||[];$('#rows').innerHTML=items.map((r,i)=>'<tr><td>'+(i+1)+'</td><td class="ok">'+r.ip+'</td><td>'+r.ports.join(', ')+'</td></tr>').join('');$('#copy').disabled=!(x.found_ips>0);$('#export').disabled=!(x.open_ports>0);$('#resultMeta').textContent=(x.found_ips||0)+' 个 IP / '+(x.open_ports||0)+' 个开放端口'+(x.truncated?' · 页面显示最近 500 个':'')}''',
-              "$('#start').onclick": r'''$('#start').onclick=async()=>{const targets=value('#targets').split(/[\s,;]+/).filter(Boolean);const ports=value('#ports').split(/[\s,;]+/).filter(Boolean).map(Number);if(!targets.length)return alert('请输入目标');if(!ports.length)return alert('请输入端口');const body={targets,ports,timeout:number('#timeout'),workers:number('#workers'),rate:number('#rate')};const r=await fetch('/api/scan/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const x=await r.json();if(!r.ok)return alert(x.error||'启动失败');job=x.id;$('#start').disabled=true;$('#cancel').disabled=false;$('#progressCard').classList.remove('hidden');$('#resultCard').classList.remove('hidden');$('#status').textContent='目标包含 '+x.hosts.toLocaleString()+' 个 IPv4，共 '+x.attempts.toLocaleString()+' 次连接尝试';poller=setInterval(poll,500);poll()};''',
-              "async function poll()": r'''async function poll(){if(!job)return;const r=await fetch('/api/scan/job?id='+encodeURIComponent(job));if(!r.ok)return;const x=await r.json();const p=x.total?Math.round(x.done*100/x.total):0;$('#fill').style.width=p+'%';$('#pct').textContent=p+'%';$('#found').textContent='发现 '+(x.found_ips||0).toLocaleString()+' 个 IP';$('#status').textContent=x.done.toLocaleString()+'/'+x.total.toLocaleString()+' 次连接尝试 · '+x.status+(x.message?' · '+x.message:'');render(x);if(['complete','failed','cancelled'].includes(x.status)){clearInterval(poller);$('#start').disabled=false;$('#cancel').disabled=true}}''',
-          }
-          seen = set()
-          for index, line in enumerate(lines):
-              for prefix, replacement in replacements.items():
-                  if line.startswith(prefix):
-                      lines[index] = replacement
-                      seen.add(prefix)
-                      break
-          missing = set(replacements) - seen
-          if missing:
-              raise SystemExit("missing expected lines: " + ", ".join(sorted(missing)))
-          path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-          PY
-          gofmt -w main.go
-
       - name: Test
         run: |
           go test ./...
@@ -65,14 +40,14 @@ jobs:
           GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o dist/active-ip-sniffer-linux-arm64 .
           sha256sum dist/active-ip-sniffer-linux-* > dist/SHA256SUMS
 
-      - name: Commit repaired source and generated binaries
+      - name: Commit generated binaries
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add main.go dist/
+          git add dist/
           if git diff --cached --quiet; then
-            echo "Source and binaries unchanged."
+            echo "Binaries unchanged."
             exit 0
           fi
-          git commit -m "build: repair source and refresh Go binaries [skip ci]"
+          git commit -m "build: refresh Go binaries [skip ci]"
           git push
