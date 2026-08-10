@@ -1,0 +1,51 @@
+name: Build Go binaries
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "main.go"
+      - "main_test.go"
+      - "go.mod"
+      - ".github/workflows/build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    if: "!contains(github.event.head_commit.message || '', '[skip ci]')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build static binaries
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p dist
+          GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/active-ip-sniffer-linux-amd64 .
+          GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o dist/active-ip-sniffer-linux-arm64 .
+          sha256sum dist/active-ip-sniffer-linux-* > dist/SHA256SUMS
+
+      - name: Commit generated binaries
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add dist/
+          if git diff --cached --quiet; then
+            echo "Binaries unchanged."
+            exit 0
+          fi
+          git commit -m "build: refresh Go binaries [skip ci]"
+          git push
