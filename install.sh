@@ -53,7 +53,8 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now "${SERVICE}"
+systemctl enable "${SERVICE}" >/dev/null
+systemctl restart "${SERVICE}"
 
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi '^Status: active'; then
   ufw allow "${WEB_PORT}/tcp" >/dev/null
