@@ -42,9 +42,25 @@ install -d -m 0755 "${APP_DIR}"
 install -d -m 0750 "${DATA_DIR}"
 
 BINARY_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/dist/active-ip-sniffer-linux-${ARCH}"
+SUMS_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/dist/SHA256SUMS"
 TMP_BINARY="$(mktemp)"
-trap 'rm -f "${TMP_BINARY}"' EXIT
-curl -fL --retry 3 --connect-timeout 10 "${BINARY_URL}" -o "${TMP_BINARY}"
+TMP_SUMS="$(mktemp)"
+trap 'rm -f "${TMP_BINARY}" "${TMP_SUMS}"' EXIT
+CACHE_BUST="$(date +%s%N)"
+curl -fL --retry 3 --connect-timeout 10 "${BINARY_URL}?cb=${CACHE_BUST}" -o "${TMP_BINARY}"
+curl -fsSL --retry 3 --connect-timeout 10 "${SUMS_URL}?cb=${CACHE_BUST}" -o "${TMP_SUMS}"
+EXPECTED_SHA="$(awk -v file="dist/active-ip-sniffer-linux-${ARCH}" '$2 == file {print $1}' "${TMP_SUMS}")"
+if [[ -z "${EXPECTED_SHA}" ]]; then
+  echo "Cannot find checksum for linux-${ARCH}." >&2
+  exit 5
+fi
+ACTUAL_SHA="$(sha256sum "${TMP_BINARY}" | awk '{print $1}')"
+if [[ "${ACTUAL_SHA}" != "${EXPECTED_SHA}" ]]; then
+  echo "Binary checksum mismatch; refusing installation." >&2
+  echo "Expected: ${EXPECTED_SHA}" >&2
+  echo "Actual:   ${ACTUAL_SHA}" >&2
+  exit 6
+fi
 install -m 0755 "${TMP_BINARY}" "${APP_DIR}/active-ip-sniffer"
 
 cat > "/etc/systemd/system/${SERVICE}.service" <<EOF
