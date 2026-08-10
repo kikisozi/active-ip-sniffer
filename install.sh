@@ -41,8 +41,16 @@ fi
 install -d -m 0755 "${APP_DIR}"
 install -d -m 0750 "${DATA_DIR}"
 
-BINARY_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/dist/active-ip-sniffer-linux-${ARCH}"
-SUMS_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/dist/SHA256SUMS"
+REF="$(curl -fsSL --retry 3 --connect-timeout 10 "https://api.github.com/repos/${REPO}/commits/${BRANCH}?cb=$(date +%s%N)" \
+  | sed -n 's/^[[:space:]]*"sha": "\([0-9a-f]\{40\}\)",*$/\1/p' \
+  | head -n 1)"
+if [[ ! "${REF}" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "Cannot resolve the current GitHub commit for ${REPO}:${BRANCH}." >&2
+  exit 5
+fi
+
+BINARY_URL="https://raw.githubusercontent.com/${REPO}/${REF}/dist/active-ip-sniffer-linux-${ARCH}"
+SUMS_URL="https://raw.githubusercontent.com/${REPO}/${REF}/dist/SHA256SUMS"
 TMP_BINARY="$(mktemp)"
 TMP_SUMS="$(mktemp)"
 trap 'rm -f "${TMP_BINARY}" "${TMP_SUMS}"' EXIT
@@ -52,14 +60,14 @@ curl -fsSL --retry 3 --connect-timeout 10 "${SUMS_URL}?cb=${CACHE_BUST}" -o "${T
 EXPECTED_SHA="$(awk -v file="dist/active-ip-sniffer-linux-${ARCH}" '$2 == file {print $1}' "${TMP_SUMS}")"
 if [[ -z "${EXPECTED_SHA}" ]]; then
   echo "Cannot find checksum for linux-${ARCH}." >&2
-  exit 5
+  exit 6
 fi
 ACTUAL_SHA="$(sha256sum "${TMP_BINARY}" | awk '{print $1}')"
 if [[ "${ACTUAL_SHA}" != "${EXPECTED_SHA}" ]]; then
   echo "Binary checksum mismatch; refusing installation." >&2
   echo "Expected: ${EXPECTED_SHA}" >&2
   echo "Actual:   ${ACTUAL_SHA}" >&2
-  exit 6
+  exit 7
 fi
 install -m 0755 "${TMP_BINARY}" "${APP_DIR}/active-ip-sniffer"
 
