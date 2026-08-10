@@ -23,8 +23,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 
-APP_VERSION = "1.0.0"
-MAX_IPS = 65_536
+APP_VERSION = "1.0.1"
 MAX_PORTS = 32
 MAX_ATTEMPTS = 2_000_000
 MAX_WORKERS = 512
@@ -39,11 +38,11 @@ HTML = r'''<!doctype html>
 :root{color-scheme:light;--bg:#f4f6f8;--card:#fff;--ink:#17202a;--muted:#667085;--line:#d8dee6;--accent:#087f5b;--danger:#c92a2a}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 system-ui,"Segoe UI",sans-serif}header{height:58px;background:#17202a;color:white;display:flex;align-items:center;justify-content:space-between;padding:0 22px}.app{max-width:980px;margin:0 auto;padding:18px}.card{background:var(--card);border:1px solid var(--line);border-radius:8px;margin-bottom:14px}.card h2{font-size:14px;margin:0;padding:12px 14px;border-bottom:1px solid var(--line)}.body{padding:14px}.grid{display:grid;grid-template-columns:repeat(12,1fr);gap:12px}.s12{grid-column:span 12}.s6{grid-column:span 6}.s4{grid-column:span 4}.s3{grid-column:span 3}.field label{display:block;font-size:12px;font-weight:700;color:#475467;margin:0 0 6px}.field input,.field textarea{width:100%;border:1px solid #cbd3dd;border-radius:5px;padding:9px 10px;background:white;min-height:38px}.field textarea{min-height:130px;resize:vertical;font-family:ui-monospace,Consolas,monospace}.row{display:flex;gap:9px;align-items:center;flex-wrap:wrap}.actions{display:flex;justify-content:space-between;gap:10px;align-items:center}.btn{border:1px solid transparent;border-radius:5px;padding:9px 14px;font-weight:700;cursor:pointer}.primary{background:var(--accent);color:#fff}.secondary{background:#fff;border-color:#b8c1cc}.danger{background:#fff;border-color:#ffa8a8;color:var(--danger)}.btn:disabled{opacity:.45;cursor:not-allowed}.metric{display:grid;grid-template-columns:150px 1fr 75px;align-items:center;gap:12px}.track{height:9px;background:#e9ecef;border-radius:5px;overflow:hidden}.fill{height:100%;width:0;background:var(--accent);transition:width .2s}.muted{color:var(--muted)}.notice{padding:9px 11px;background:#edf8fa;border-left:3px solid #0b7285;font-size:12px;color:#38515a}.table-wrap{max-height:430px;overflow:auto}table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}th,td{padding:9px 11px;border-bottom:1px solid #e9edf2;text-align:left;white-space:nowrap}th{position:sticky;top:0;background:#f8f9fa;font-size:11px;text-transform:uppercase;color:#596579}.num{text-align:right}.ok{color:#087f5b}.hidden{display:none!important}@media(max-width:720px){.s6,.s4,.s3{grid-column:span 12}.actions{flex-direction:column;align-items:stretch}.metric{grid-template-columns:105px 1fr 55px}}
 </style></head><body>
-<header><strong>Active IP Sniffer</strong><span id="version">v1.0.0</span></header>
+<header><strong>Active IP Sniffer</strong><span id="version">v1.0.1</span></header>
 <main class="app">
   <section class="card"><h2>扫描参数</h2><div class="body grid">
     <div class="field s6"><label>目标（单 IP / CIDR / 起止范围，可混合）</label><textarea id="targets" placeholder="103.117.100.0/22&#10;203.0.113.10-203.0.113.50&#10;198.51.100.8"></textarea></div>
-    <div class="field s6"><label>TCP 端口</label><input id="ports" value="80,443"><div style="height:10px"></div><label>说明</label><div class="notice">只做 TCP connect 可达性探测，不发送漏洞利用载荷。单次最多 65,536 个 IPv4、32 个端口、2,000,000 次连接尝试。</div></div>
+    <div class="field s6"><label>TCP 端口</label><input id="ports" value="80,443"><div style="height:10px"></div><label>说明</label><div class="notice">只做 TCP connect 可达性探测，不发送漏洞利用载荷。IPv4 数量不设固定上限；一次最多 32 个端口、2,000,000 次连接尝试。</div></div>
     <div class="field s3"><label>超时（秒）</label><input id="timeout" type="number" min="0.05" max="5" step="0.05" value="0.8"></div>
     <div class="field s3"><label>并发</label><input id="workers" type="number" min="1" max="512" value="256"></div>
     <div class="field s3"><label>速率（连接/秒）</label><input id="rate" type="number" min="1" max="5000" value="500"></div>
@@ -80,13 +79,16 @@ def tcp_reachable(ip: str, port: int, timeout: float) -> bool:
         return False
 
 
-def parse_scan_targets(values: list[Any]) -> list[str]:
+def parse_scan_targets(values: list[Any], max_addresses: int | None = None) -> list[str]:
     addresses: set[ipaddress.IPv4Address] = set()
 
     def add(address: ipaddress.IPv4Address) -> None:
         addresses.add(address)
-        if len(addresses) > MAX_IPS:
-            raise ValueError(f"combined scan targets exceed {MAX_IPS:,} unique IPv4 addresses")
+        if max_addresses is not None and len(addresses) > max_addresses:
+            raise ValueError(
+                f"scan target count exceeds {max_addresses:,} IPv4 addresses for the selected ports; "
+                f"the limit is {MAX_ATTEMPTS:,} total connection attempts"
+            )
 
     for raw in values:
         value = str(raw).strip()
@@ -103,8 +105,11 @@ def parse_scan_targets(values: list[Any]) -> list[str]:
                 raise ValueError(f"only IPv4 ranges are supported: {value}")
             if int(start) > int(end):
                 raise ValueError(f"IP range start is greater than end: {value}")
-            if int(end) - int(start) + 1 > MAX_IPS:
-                raise ValueError(f"IP range exceeds {MAX_IPS:,} addresses: {value}")
+            if max_addresses is not None and int(end) - int(start) + 1 > max_addresses:
+                raise ValueError(
+                    f"IP range contains more than {max_addresses:,} addresses for the selected ports; "
+                    f"the limit is {MAX_ATTEMPTS:,} total connection attempts"
+                )
             for number in range(int(start), int(end) + 1):
                 add(ipaddress.IPv4Address(number))
             continue
@@ -116,8 +121,12 @@ def parse_scan_targets(values: list[Any]) -> list[str]:
                 raise ValueError(f"invalid CIDR target: {value}") from exc
             if not isinstance(network, ipaddress.IPv4Network):
                 raise ValueError(f"only IPv4 CIDR is supported: {value}")
-            if network.num_addresses > MAX_IPS:
-                raise ValueError(f"CIDR exceeds {MAX_IPS:,} addresses: {value}")
+            usable_addresses = network.num_addresses - 2 if network.prefixlen < 31 else network.num_addresses
+            if max_addresses is not None and usable_addresses > max_addresses:
+                raise ValueError(
+                    f"CIDR contains more than {max_addresses:,} usable addresses for the selected ports; "
+                    f"the limit is {MAX_ATTEMPTS:,} total connection attempts"
+                )
             for address in network.hosts():
                 add(address)
             continue
@@ -315,10 +324,11 @@ class Handler(BaseHTTPRequestHandler):
             targets = list(
                 dict.fromkeys(str(value).strip() for value in payload.get("targets", []) if str(value).strip())
             )
-            addresses = parse_scan_targets(targets)
             ports = sorted(set(int(port) for port in payload.get("ports", [])))
             if not ports or len(ports) > MAX_PORTS or any(port < 1 or port > 65535 for port in ports):
                 raise ValueError(f"provide 1 to {MAX_PORTS} valid TCP ports")
+            max_addresses = MAX_ATTEMPTS // len(ports)
+            addresses = parse_scan_targets(targets, max_addresses=max_addresses)
             attempts = len(addresses) * len(ports)
             if attempts > MAX_ATTEMPTS:
                 raise ValueError(f"scan exceeds {MAX_ATTEMPTS:,} connection attempts")
