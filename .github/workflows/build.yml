@@ -36,8 +36,8 @@ jobs:
           CGO_ENABLED: "0"
         run: |
           mkdir -p dist
-          GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/active-ip-sniffer-linux-amd64 .
-          GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o dist/active-ip-sniffer-linux-arm64 .
+          GOOS=linux GOARCH=amd64 go build -buildvcs=false -trimpath -ldflags="-s -w" -o dist/active-ip-sniffer-linux-amd64 .
+          GOOS=linux GOARCH=arm64 go build -buildvcs=false -trimpath -ldflags="-s -w" -o dist/active-ip-sniffer-linux-arm64 .
           sha256sum dist/active-ip-sniffer-linux-* > dist/SHA256SUMS
 
       - name: Commit generated binaries
@@ -50,4 +50,5 @@ jobs:
             exit 0
           fi
           git commit -m "build: refresh Go binaries [skip ci]"
+          git pull --rebase origin main
           git push
