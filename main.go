@@ -24,7 +24,7 @@ import (
 )
 
 const (
-	appVersion        = "2.0.0"
+	appVersion        = "2.1.0"
 	maxPorts          = 32
 	maxAttempts       = uint64(2_000_000)
 	maxWorkers        = 512
@@ -732,6 +732,10 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("/api/scan/cancel", a.handleCancel)
 	mux.HandleFunc("/api/scan/export.csv", a.handleExportCSV)
 	mux.HandleFunc("/api/scan/export.txt", a.handleExportTXT)
+	mux.HandleFunc("/api/vless/start", handleVLESSBenchStart)
+	mux.HandleFunc("/api/vless/job", handleVLESSBenchJob)
+	mux.HandleFunc("/api/vless/cancel", handleVLESSBenchCancel)
+	mux.HandleFunc("/api/vless/export.csv", handleVLESSBenchExportCSV)
 	return mux
 }
 
@@ -759,6 +763,7 @@ func main() {
 				return
 			case now := <-ticker.C:
 				application.store.cleanupOld(now)
+				vlessBenchJobs.cleanupOld(now)
 				cleanupResultDirectory(*dataDir, now)
 			}
 		}
@@ -781,6 +786,7 @@ func main() {
 	}
 	close(cleanupStop)
 	application.store.cancelAll()
+	vlessBenchJobs.cancelAll()
 }
 
 const indexHTML = `<!doctype html>
@@ -788,9 +794,9 @@ const indexHTML = `<!doctype html>
 <title>Active IP Sniffer</title>
 <style>
 :root{color-scheme:light;--bg:#f4f6f8;--card:#fff;--ink:#17202a;--muted:#667085;--line:#d8dee6;--accent:#087f5b;--danger:#c92a2a}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 system-ui,"Segoe UI",sans-serif}header{height:58px;background:#17202a;color:white;display:flex;align-items:center;justify-content:space-between;padding:0 22px}.app{max-width:980px;margin:0 auto;padding:18px}.card{background:var(--card);border:1px solid var(--line);border-radius:8px;margin-bottom:14px}.card h2{font-size:14px;margin:0;padding:12px 14px;border-bottom:1px solid var(--line)}.body{padding:14px}.grid{display:grid;grid-template-columns:repeat(12,1fr);gap:12px}.s6{grid-column:span 6}.s3{grid-column:span 3}.field label{display:block;font-size:12px;font-weight:700;color:#475467;margin:0 0 6px}.field input,.field textarea{width:100%;border:1px solid #cbd3dd;border-radius:5px;padding:9px 10px;background:white;min-height:38px}.field textarea{min-height:130px;resize:vertical;font-family:ui-monospace,Consolas,monospace}.row{display:flex;gap:9px;align-items:center;flex-wrap:wrap}.actions{display:flex;justify-content:space-between;gap:10px;align-items:center}.btn{border:1px solid transparent;border-radius:5px;padding:9px 14px;font-weight:700;cursor:pointer}.primary{background:var(--accent);color:#fff}.secondary{background:#fff;border-color:#b8c1cc}.danger{background:#fff;border-color:#ffa8a8;color:var(--danger)}.btn:disabled{opacity:.45;cursor:not-allowed}.metric{display:grid;grid-template-columns:150px 1fr 75px;align-items:center;gap:12px}.track{height:9px;background:#e9ecef;border-radius:5px;overflow:hidden}.fill{height:100%;width:0;background:var(--accent);transition:width .2s}.muted{color:var(--muted)}.notice{padding:9px 11px;background:#edf8fa;border-left:3px solid #0b7285;font-size:12px;color:#38515a}.table-wrap{max-height:430px;overflow:auto}table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}th,td{padding:9px 11px;border-bottom:1px solid #e9edf2;text-align:left;white-space:nowrap}th{position:sticky;top:0;background:#f8f9fa;font-size:11px;text-transform:uppercase;color:#596579}.ok{color:#087f5b}.hidden{display:none!important}@media(max-width:720px){.s6,.s3{grid-column:span 12}.actions{flex-direction:column;align-items:stretch}.metric{grid-template-columns:105px 1fr 55px}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 system-ui,"Segoe UI",sans-serif}header{height:58px;background:#17202a;color:white;display:flex;align-items:center;justify-content:space-between;padding:0 22px}.app{max-width:1180px;margin:0 auto;padding:18px}.card{background:var(--card);border:1px solid var(--line);border-radius:8px;margin-bottom:14px}.card h2{font-size:14px;margin:0;padding:12px 14px;border-bottom:1px solid var(--line)}.body{padding:14px}.grid{display:grid;grid-template-columns:repeat(12,1fr);gap:12px}.s12{grid-column:span 12}.s6{grid-column:span 6}.s3{grid-column:span 3}.field label{display:block;font-size:12px;font-weight:700;color:#475467;margin:0 0 6px}.field input,.field textarea{width:100%;border:1px solid #cbd3dd;border-radius:5px;padding:9px 10px;background:white;min-height:38px}.field textarea{min-height:130px;resize:vertical;font-family:ui-monospace,Consolas,monospace}.row{display:flex;gap:9px;align-items:center;flex-wrap:wrap}.actions{display:flex;justify-content:space-between;gap:10px;align-items:center}.btn{border:1px solid transparent;border-radius:5px;padding:9px 14px;font-weight:700;cursor:pointer}.primary{background:var(--accent);color:#fff}.secondary{background:#fff;border-color:#b8c1cc}.danger{background:#fff;border-color:#ffa8a8;color:var(--danger)}.btn:disabled{opacity:.45;cursor:not-allowed}.metric{display:grid;grid-template-columns:150px 1fr 75px;align-items:center;gap:12px}.track{height:9px;background:#e9ecef;border-radius:5px;overflow:hidden}.fill{height:100%;width:0;background:var(--accent);transition:width .2s}.muted{color:var(--muted)}.notice{padding:9px 11px;background:#edf8fa;border-left:3px solid #0b7285;font-size:12px;color:#38515a}.table-wrap{max-height:430px;overflow:auto}table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}th,td{padding:9px 11px;border-bottom:1px solid #e9edf2;text-align:left;white-space:nowrap}th{position:sticky;top:0;background:#f8f9fa;font-size:11px;text-transform:uppercase;color:#596579}.ok{color:#087f5b}.bad{color:#c92a2a}.hidden{display:none!important}@media(max-width:720px){.s12,.s6,.s3{grid-column:span 12}.actions{flex-direction:column;align-items:stretch}.metric{grid-template-columns:105px 1fr 55px}}
 </style></head><body>
-<header><strong>Active IP Sniffer</strong><span id="version">Go v2.0.0</span></header>
+<header><strong>Active IP Sniffer</strong><span id="version">Go v2.1.0</span></header>
 <main class="app">
   <section class="card"><h2>扫描参数</h2><div class="body grid">
     <div class="field s6"><label>目标（单 IP / CIDR / 起止范围，可混合）</label><textarea id="targets" placeholder="103.117.100.0/22&#10;203.0.113.10-203.0.113.50&#10;198.51.100.8"></textarea></div>
@@ -801,16 +807,34 @@ const indexHTML = `<!doctype html>
     <div class="s3 actions"><button id="cancel" class="btn danger" disabled>停止</button><button id="start" class="btn primary">开始扫描</button></div>
   </div></section>
   <section id="progressCard" class="card hidden"><h2>进度</h2><div class="body"><div class="metric"><strong id="found">发现 0 个 IP</strong><div class="track"><div id="fill" class="fill"></div></div><span id="pct">0%</span></div><div id="status" class="muted" style="margin-top:10px">等待扫描</div></div></section>
-  <section id="resultCard" class="card hidden"><h2>结果</h2><div class="body actions"><span id="resultMeta" class="muted"></span><div class="row"><button id="copy" class="btn secondary" disabled>复制全部 IP</button><button id="export" class="btn secondary" disabled>导出 CSV</button></div></div><div class="table-wrap"><table><thead><tr><th>#</th><th>IP</th><th>开放端口</th></tr></thead><tbody id="rows"></tbody></table></div></section>
+  <section id="resultCard" class="card hidden"><h2>结果</h2><div class="body actions"><span id="resultMeta" class="muted"></span><div class="row"><button id="sendToBench" class="btn secondary" disabled>填入 VLESS 测试</button><button id="copy" class="btn secondary" disabled>复制全部 IP</button><button id="export" class="btn secondary" disabled>导出 CSV</button></div></div><div class="table-wrap"><table><thead><tr><th>#</th><th>IP</th><th>开放端口</th></tr></thead><tbody id="rows"></tbody></table></div></section>
+
+  <section class="card"><h2>VLESS Endpoint Bench</h2><div class="body grid">
+    <div class="field s6"><label>候选 IPv4（每行或逗号分隔）</label><textarea id="benchTargets" placeholder="8.217.238.203&#10;8.210.214.167&#10;47.242.87.115"></textarea></div>
+    <div class="field s6"><label>VLESS TLS+WS 连接</label><input id="benchURI" type="password" autocomplete="off" placeholder="vless://UUID@IP:443?...&security=tls&type=ws&host=...&path=..."><div style="height:10px"></div><div class="notice">候选 IP 只替换连接地址；UUID、端口、SNI、Host、Path 全部沿用 VLESS 链接。测试依次验证 TCP → TLS/WS 101 → VLESS 实际出站 → speed.cloudflare.com 下载。测速串行执行，避免多个候选同时抢带宽。VLESS 链接仅保存在本次任务内存中，不写 CSV、不写日志。</div></div>
+    <div class="field s3"><label>每个 IP 下载（MB）</label><input id="benchMB" type="number" min="1" max="100" value="30"></div>
+    <div class="field s3"><label>阶段超时（秒）</label><input id="benchTimeout" type="number" min="2" max="20" step="1" value="12"></div>
+    <div class="s6 actions"><span class="muted">最多 128 个候选；TCP 启动取 3 次中位数。</span><div class="row"><button id="benchCancel" class="btn danger" disabled>停止测试</button><button id="benchStart" class="btn primary">开始测试</button></div></div>
+  </div></section>
+  <section id="benchProgressCard" class="card hidden"><h2>VLESS 测试进度</h2><div class="body"><div class="metric"><strong id="benchPassed">通过 0 个 IP</strong><div class="track"><div id="benchFill" class="fill"></div></div><span id="benchPct">0%</span></div><div id="benchStatus" class="muted" style="margin-top:10px">等待测试</div></div></section>
+  <section id="benchResultCard" class="card hidden"><h2>VLESS 测试结果</h2><div class="body actions"><span id="benchMeta" class="muted"></span><button id="benchExport" class="btn secondary" disabled>导出测速 CSV</button></div><div class="table-wrap"><table><thead><tr><th>#</th><th>IP</th><th>TCP</th><th>TCP 中位</th><th>TLS/WS</th><th>VLESS 启动</th><th>前 1s</th><th>前 3s</th><th>稳定</th><th>峰值</th><th>结果</th></tr></thead><tbody id="benchRows"></tbody></table></div></section>
 </main>
 <script>
-const $=s=>document.querySelector(s);let job=null,poller=null;
+const $=s=>document.querySelector(s);let job=null,poller=null,benchJob=null,benchPoller=null;
 function value(id){return $(id).value.trim()}function number(id){return Number(value(id))}
-function render(x){const items=x.results||[];$('#rows').innerHTML=items.map((r,i)=>'<tr><td>'+(i+1)+'</td><td class="ok">'+r.ip+'</td><td>'+r.ports.join(', ')+'</td></tr>').join('');$('#copy').disabled=!(x.found_ips>0);$('#export').disabled=!(x.open_ports>0);$('#resultMeta').textContent=(x.found_ips||0)+' 个 IP / '+(x.open_ports||0)+' 个开放端口'+(x.truncated?' · 页面显示最近 500 个':'')}
+function render(x){const items=x.results||[];$('#rows').innerHTML=items.map((r,i)=>'<tr><td>'+(i+1)+'</td><td class="ok">'+r.ip+'</td><td>'+r.ports.join(', ')+'</td></tr>').join('');$('#copy').disabled=!(x.found_ips>0);$('#sendToBench').disabled=!(x.found_ips>0);$('#export').disabled=!(x.open_ports>0);$('#resultMeta').textContent=(x.found_ips||0)+' 个 IP / '+(x.open_ports||0)+' 个开放端口'+(x.truncated?' · 页面显示最近 500 个':'')}
 $('#start').onclick=async()=>{const targets=value('#targets').split(/[\s,;]+/).filter(Boolean);const ports=value('#ports').split(/[\s,;]+/).filter(Boolean).map(Number);if(!targets.length)return alert('请输入目标');if(!ports.length)return alert('请输入端口');const body={targets,ports,timeout:number('#timeout'),workers:number('#workers'),rate:number('#rate')};const r=await fetch('/api/scan/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const x=await r.json();if(!r.ok)return alert(x.error||'启动失败');job=x.id;$('#start').disabled=true;$('#cancel').disabled=false;$('#progressCard').classList.remove('hidden');$('#resultCard').classList.remove('hidden');$('#status').textContent='目标包含 '+x.hosts.toLocaleString()+' 个 IPv4，共 '+x.attempts.toLocaleString()+' 次连接尝试';poller=setInterval(poll,500);poll()};
 $('#cancel').onclick=async()=>{if(job)await fetch('/api/scan/cancel?id='+encodeURIComponent(job),{method:'POST'})};
 async function poll(){if(!job)return;const r=await fetch('/api/scan/job?id='+encodeURIComponent(job));if(!r.ok)return;const x=await r.json();const p=x.total?Math.round(x.done*100/x.total):0;$('#fill').style.width=p+'%';$('#pct').textContent=p+'%';$('#found').textContent='发现 '+(x.found_ips||0).toLocaleString()+' 个 IP';$('#status').textContent=x.done.toLocaleString()+'/'+x.total.toLocaleString()+' 次连接尝试 · '+x.status+(x.message?' · '+x.message:'');render(x);if(['complete','failed','cancelled'].includes(x.status)){clearInterval(poller);$('#start').disabled=false;$('#cancel').disabled=true}}
 $('#export').onclick=()=>{if(job)location.href='/api/scan/export.csv?id='+encodeURIComponent(job)};
 $('#copy').onclick=async()=>{if(!job)return;const r=await fetch('/api/scan/export.txt?id='+encodeURIComponent(job));if(!r.ok)return alert('读取结果失败');await navigator.clipboard.writeText(await r.text());$('#copy').textContent='已复制';setTimeout(()=>$('#copy').textContent='复制全部 IP',1000)};
+$('#sendToBench').onclick=async()=>{if(!job)return;const r=await fetch('/api/scan/export.txt?id='+encodeURIComponent(job));if(!r.ok)return alert('读取结果失败');$('#benchTargets').value=(await r.text()).trim();$('#benchTargets').scrollIntoView({behavior:'smooth',block:'center'})};
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const mbps=n=>(Number(n)||0).toFixed(1)+' Mbps';const ms=n=>(Number(n)||0).toFixed(1)+' ms';
+function renderBench(x){const items=x.results||[];$('#benchRows').innerHTML=items.map((r,i)=>{const good=r.status==='ok';const detail=good?'通过':((r.failure_stage?esc(r.failure_stage)+': ':'')+esc(r.error||'失败'));return '<tr><td>'+(i+1)+'</td><td class="'+(good?'ok':'bad')+'">'+esc(r.ip)+'</td><td>'+r.tcp_passed+'/'+r.tcp_attempts+'</td><td>'+ms(r.tcp_median_ms)+'</td><td>'+(r.transport_ok?ms(r.transport_ms):'失败')+'</td><td>'+(r.vless_ok?ms(r.startup_ms):'失败')+'</td><td>'+mbps(r.first_1s_mbps)+'</td><td>'+mbps(r.first_3s_mbps)+'</td><td>'+mbps(r.stable_mbps)+'</td><td>'+mbps(r.peak_mbps)+'</td><td class="'+(good?'ok':'bad')+'">'+detail+'</td></tr>'}).join('');$('#benchExport').disabled=!items.length;$('#benchMeta').textContent=(x.passed||0)+'/'+(x.total||0)+' 个 IP 通过完整 VLESS+下载验证'}
+$('#benchStart').onclick=async()=>{const candidates=value('#benchTargets').split(/[\s,;]+/).filter(Boolean);const vless=value('#benchURI');if(!candidates.length)return alert('请输入候选 IP');if(!vless)return alert('请输入 VLESS 连接');const body={vless,candidates,bytes_mb:number('#benchMB'),timeout:number('#benchTimeout')};const r=await fetch('/api/vless/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const x=await r.json();if(!r.ok)return alert(x.error||'VLESS 测试启动失败');benchJob=x.id;$('#benchStart').disabled=true;$('#benchCancel').disabled=false;$('#benchProgressCard').classList.remove('hidden');$('#benchResultCard').classList.remove('hidden');$('#benchStatus').textContent='正在串行测试 '+x.candidates+' 个候选；每个成功候选下载 '+x.bytes_mb+' MB';benchPoller=setInterval(pollBench,700);pollBench()};
+$('#benchCancel').onclick=async()=>{if(benchJob)await fetch('/api/vless/cancel?id='+encodeURIComponent(benchJob),{method:'POST'})};
+async function pollBench(){if(!benchJob)return;const r=await fetch('/api/vless/job?id='+encodeURIComponent(benchJob));if(!r.ok)return;const x=await r.json();const p=x.total?Math.round(x.done*100/x.total):0;$('#benchFill').style.width=p+'%';$('#benchPct').textContent=p+'%';$('#benchPassed').textContent='通过 '+(x.passed||0)+' 个 IP';$('#benchStatus').textContent=x.done+'/'+x.total+' · '+x.status+(x.message?' · '+x.message:'');renderBench(x);if(['complete','cancelled','failed'].includes(x.status)){clearInterval(benchPoller);$('#benchStart').disabled=false;$('#benchCancel').disabled=true}}
+$('#benchExport').onclick=()=>{if(benchJob)location.href='/api/vless/export.csv?id='+encodeURIComponent(benchJob)};
 fetch('/api/info').then(r=>r.json()).then(x=>$('#version').textContent='Go v'+x.version);
 </script></body></html>`
