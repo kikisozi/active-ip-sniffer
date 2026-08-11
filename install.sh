@@ -86,7 +86,7 @@ echo "Command: ${V_CMD}"
 echo
 
 # curl | sudo bash 时 stdin 属于管道，交互必须显式连接当前终端。
-if [[ -r /dev/tty && -w /dev/tty ]]; then
+if [[ -t 1 && -r /dev/tty && -w /dev/tty ]]; then
   exec "${APP_BIN}" setup </dev/tty >/dev/tty 2>/dev/tty
 fi
 
