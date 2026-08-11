@@ -1,2 +1,4 @@
-81750fe3a6a9245fd7986af9321cd2cfd0f9757780afcda3438e663957031102  dist/active-ip-sniffer-linux-amd64
-2125aa7a598c55ce44b5371273c35162f97c532d2157639a4762f4295a1db339  dist/active-ip-sniffer-linux-arm64
+8fa19db5489f19b5418b107d895c5d957225ce1f664dd76a3b7850db2b6e33f1  dist/active-ip-sniffer-linux-amd64
+160b62f1209ffad71bb8fcd1de8efe9be2329021f2a1cb3e5a9eda65ea1e468e  dist/active-ip-sniffer-linux-arm64
+3f51601489b5231184b9871bf328f0a9595b7ad7c214d0ed0721246fe8c87f26  dist/active-ip-sniffer-windows-amd64.exe
+e32292bbce2dcf28ddee4d7f0d818b71f5de7fc77548242cf7b297410a3cd111  dist/active-ip-sniffer-windows-arm64.exe
