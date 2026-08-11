@@ -15,6 +15,25 @@
 - 结果文件超过 24 小时会自动清理，避免小磁盘 VPS 长期堆积。
 - 默认 worker 从 256 降到 64，更适合 128 MB RAM 的 VPS。
 
+## v2.1：VLESS Endpoint Bench
+
+WebUI 现在附带一个独立的 **VLESS TLS+WS 候选 IP 实测**模块，用于对 TCP 扫描得到的少量候选 IP 做二次验证和测速。
+
+TCP 扫描结果区提供“填入 VLESS 测试”按钮，会读取本次任务的完整命中 IP 列表并直接送入候选框，不需要手工复制页面里最近 500 条结果。
+
+测试链路不是只看 443 端口或 TLS 是否能握手，而是按顺序执行：
+
+1. 对候选 IP 的 VLESS 端口做 3 次 TCP 连接，记录启动中位数。
+2. 使用 VLESS 链接原本的 `SNI`、`Host`、`Path` 对候选 IP 完成 TLS + WebSocket `101 Switching Protocols`。
+3. 发送真实 VLESS TCP 请求，并通过该 VLESS 连接与 `speed.cloudflare.com:443` 完成第二层 TLS 握手。
+4. 通过该 VLESS 连接下载 Cloudflare speed 测试数据，记录前 1 秒、前 3 秒、稳定阶段和短窗口峰值 Mbps。
+
+候选 IP **只替换 VLESS URI 的连接地址**；UUID、端口、SNI、Host、Path 都保持原值。因此一个 IP 只有在完整 VLESS 出站也成功后才会标记为“通过”，可以排除“443 可达但节点实际不能用”的误判。
+
+测速默认每个成功 IP 下载 30 MB，且候选 IP 串行测试，避免多个测速任务同时抢占 VPS 带宽而影响排名。最多一次提交 128 个候选 IP；每个候选下载量可设置为 1-100 MB。
+
+VLESS URI 仅用于当前内存任务：不会写入扫描结果文件、不会出现在测速 CSV、程序也不会主动把 URI 写入日志。测速 CSV 只包含候选 IP、各阶段延迟、吞吐量和失败阶段。
+
 ## 资源建议
 
 对于 **128 MB RAM**：
@@ -101,6 +120,12 @@ ip,port
 ```
 
 WebUI 的表格只显示最近 500 个命中 IP，这是为了让大量结果时浏览器和服务器内存保持稳定；CSV 和“复制全部 IP”仍使用完整结果。
+
+VLESS Endpoint Bench 的 CSV 字段包括：
+
+```text
+ip,tcp_passed,tcp_attempts,tcp_median_ms,transport_ok,transport_ms,vless_ok,startup_ms,first_1s_mbps,first_3s_mbps,stable_mbps,peak_mbps,downloaded_bytes,download_seconds,status,failure_stage,error
+```
 
 ## GitHub 自动构建
 
