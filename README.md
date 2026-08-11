@@ -62,7 +62,7 @@ VLESS URI 仅用于当前内存任务：不会写入扫描结果文件、不会�
 首次只需要一条命令：
 
 ```bash
-curl -fsSL "https://github.com/kikisozi/active-ip-sniffer/raw/refs/heads/main/install.sh?cb=$(date +%s)" | sudo bash
+curl -fsSL "https://raw.githubusercontent.com/kikisozi/active-ip-sniffer/main/install.sh?cb=$(date +%s)" | sudo bash
 ```
 
 安装脚本只负责下载并校验 Go 单二进制，随后进入 **Go 编写的交互配置界面**。可交互选择：
