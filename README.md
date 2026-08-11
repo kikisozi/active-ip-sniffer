@@ -1,6 +1,6 @@
 # Active IP Sniffer
 
-一个面向低内存 VPS 的主动 TCP 可达性探测 WebUI。v2 已从 Python 重构为 Go，扫描目标采用紧凑 IPv4 数值区间表示并流式送入固定 worker pool，不再将几十万条 IP 字符串一次性展开到内存。
+一个面向低内存 VPS / Windows 的 Go 单二进制 IP 优选 WebUI。除了原有的流式 TCP 扫描，v3 还整合了 Cloudflare 直连 100 MB 测速、Top 20 排名、IP 地区/ASN/IDC 展示、Cloudflare DNS 一键更新，以及不依赖 Xray 的原生 VLESS TLS+WS 端到端测试。
 
 > 仅扫描你拥有或明确获准测试的地址范围。
 
@@ -34,6 +34,17 @@ TCP 扫描结果区提供“填入 VLESS 测试”按钮，会读取本次任务
 
 VLESS URI 仅用于当前内存任务：不会写入扫描结果文件、不会出现在测速 CSV、程序也不会主动把 URI 写入日志。测速 CSV 只包含候选 IP、各阶段延迟、吞吐量和失败阶段。
 
+## v3：CF Direct / DNS / Top 20
+
+- **CF Direct 100 MB**：候选 IP 直接承载 `speed.cloudflare.com` 的 TLS SNI / HTTP Host，不经过 VLESS 或 Xray；固定下载 `99,999,999 bytes` 一次。
+- 记录 TCP、TLS 握手、TLS 完成、TTFB、下载平均 Mbps、全程有效 Mbps、250 ms 窗口最大 Mbps、下载传输耗时、完整总耗时和 HTTP 状态。
+- 所有候选先做轻量 TCP 可达性初筛；每个 TCP 可达候选都执行 **1 次**约 100 MB 下载，测试过程中仅在内存保留当前 Top 20，最终页面与测速 CSV 最多保留 Top 20。
+- 候选输入支持单 IP、`IP:端口`、CIDR、起止 IPv4 范围；默认 443，也可选择 Cloudflare 常见 HTTPS 端口 `2053/2083/2087/2096/8443`。
+- 结果显示地区、城市、ASN、ASN 组织/ISP（作为 IDC/运营商标识），元数据使用内存缓存，避免重复查询。
+- Cloudflare API Token + 多域名可以在 WebUI 或 `v` 配置向导中验证后保存；页面完整显示当前 DNS 记录。测速结果可直接选择目标域名/A 记录并更新到优选 IP，更新后会再次从 Cloudflare API 回读验证。
+- CF Top 20 可一键送入 VLESS End-to-End 测试；单个结果也可以直接进入 VLESS 测试。
+- Cloudflare Token 保存在服务器配置文件，不回传明文给 WebUI，也不会写入测速 CSV。
+
 ## 资源建议
 
 对于 **128 MB RAM**：
@@ -46,21 +57,31 @@ VLESS URI 仅用于当前内存任务：不会写入扫描结果文件、不会�
 
 512 MB **可用**磁盘空间足够运行本项目。程序二进制约数 MB；实际磁盘消耗主要取决于命中结果文件数量。
 
-## 一键安装
+## Linux 一键安装 / `v` 配置界面
 
-默认 WebUI 端口 `8766`：
+首次只需要一条命令：
 
 ```bash
 curl -fsSL "https://github.com/kikisozi/active-ip-sniffer/raw/refs/heads/main/install.sh?cb=$(date +%s)" | sudo bash
 ```
 
-指定端口，例如 `18080`：
+安装脚本只负责下载并校验 Go 单二进制，随后进入 **Go 编写的交互配置界面**。可交互选择：
+
+- WebUI 监听地址与端口；
+- WebUI 管理密码（启用后使用 HTTP Basic Auth，用户名固定为 `admin`；配置 Cloudflare DNS 写入能力时必须启用）；
+- 是否立即配置 Cloudflare Token / 一个或多个优选域名，并联网验证；
+- Linux 选择 **常驻 systemd 守护进程** 或 **单次前台运行**；
+- 常驻模式下是否自动放行 WebUI TCP 端口。
+
+安装完成后不需要再次执行安装脚本，之后直接输入：
 
 ```bash
-curl -fsSL "https://github.com/kikisozi/active-ip-sniffer/raw/refs/heads/main/install.sh?cb=$(date +%s)" | sudo bash -s -- 18080
+v
 ```
 
-安装脚本根据 CPU 自动下载：
+即可重新进入完整配置界面。普通用户执行 `v` 时会自动尝试通过 `sudo` 进入需要 root 权限的 Linux 配置流程。
+
+Linux 安装脚本根据 CPU 自动下载：
 
 - `dist/active-ip-sniffer-linux-amd64`
 - `dist/active-ip-sniffer-linux-arm64`
@@ -73,6 +94,8 @@ curl -fsSL "https://github.com/kikisozi/active-ip-sniffer/raw/refs/heads/main/in
 
 ```text
 /opt/active-ip-sniffer/active-ip-sniffer
+/usr/local/bin/v
+/etc/active-ip-sniffer/config.json
 /var/lib/active-ip-sniffer/results/
 ```
 
@@ -83,6 +106,24 @@ systemctl status active-ip-sniffer
 systemctl restart active-ip-sniffer
 journalctl -u active-ip-sniffer -f
 ```
+
+## Windows PowerShell 一键安装
+
+Windows 也使用预编译 Go 单二进制，不要求本机安装 Go。PowerShell 中执行一次：
+
+```powershell
+irm https://raw.githubusercontent.com/kikisozi/active-ip-sniffer/main/install.ps1 | iex
+```
+
+脚本会校验 GitHub 当前 commit 对应 Windows 二进制的 SHA256，安装到当前用户的 `%LOCALAPPDATA%\ActiveIPSniffer`，把目录加入用户 `PATH`，并创建 `v.cmd`。之后 PowerShell 或 CMD 中直接输入：
+
+```powershell
+v
+```
+
+即可进入同一个 Go 配置界面。Windows 按要求使用**单次前台模式**：配置完成后启动 WebUI，关闭进程即停止，不创建 Windows Service。
+
+> Cloudflare Token 仅保存在本机配置文件中，Linux 配置文件权限为 `0600`；WebUI 不会回传 Token 明文。为避免公开 WebUI 获得 DNS 写权限，保存 Cloudflare Token 前必须通过 `v` 配置 WebUI 管理密码。
 
 ## 扫描限制
 
@@ -105,7 +146,7 @@ journalctl -u active-ip-sniffer -f
 ```bash
 go test ./...
 go build -trimpath -ldflags="-s -w" -o active-ip-sniffer .
-./active-ip-sniffer -host 127.0.0.1 -port 8766
+./active-ip-sniffer serve -host 127.0.0.1 -port 8766
 ```
 
 ## CSV 导出
@@ -119,7 +160,7 @@ ip,port
 103.117.101.20,443
 ```
 
-WebUI 的表格只显示最近 500 个命中 IP，这是为了让大量结果时浏览器和服务器内存保持稳定；CSV 和“复制全部 IP”仍使用完整结果。
+TCP 扫描后端内存环形区最多保留最近 500 个命中 IP，新 UI 表格只渲染最近 50 条并查询地区/ASN/IDC，以避免浏览器和外部元数据查询被大量结果拖慢；CSV 和“复制全部 IP”仍使用完整落盘结果。
 
 VLESS Endpoint Bench 的 CSV 字段包括：
 
@@ -129,7 +170,7 @@ ip,tcp_passed,tcp_attempts,tcp_median_ms,transport_ok,transport_ms,vless_ok,star
 
 ## GitHub 自动构建
 
-`.github/workflows/build.yml` 会在 `main` 上源码变化时构建 Linux amd64/arm64 二进制，并将生成文件提交到 `dist/`。自动生成二进制的提交包含 `[skip ci]`，不会形成循环构建。
+`.github/workflows/build.yml` 会在 `main` 上源码变化时执行 `go test` / `go vet`，并构建 Linux amd64/arm64 与 Windows amd64/arm64 四个静态 Go 二进制，统一生成 `dist/SHA256SUMS` 后提交到 `dist/`。自动生成二进制的提交包含 `[skip ci]`，不会形成循环构建。
 
 ## 卸载
 
@@ -137,7 +178,8 @@ ip,tcp_passed,tcp_attempts,tcp_median_ms,transport_ok,transport_ms,vless_ok,star
 sudo systemctl disable --now active-ip-sniffer
 sudo rm -f /etc/systemd/system/active-ip-sniffer.service
 sudo systemctl daemon-reload
-sudo rm -rf /opt/active-ip-sniffer /var/lib/active-ip-sniffer
+sudo rm -f /usr/local/bin/v
+sudo rm -rf /opt/active-ip-sniffer /etc/active-ip-sniffer /var/lib/active-ip-sniffer
 ```
 
 如果安装脚本曾自动放行防火墙端口，请按实际端口删除对应 UFW/firewalld 规则。

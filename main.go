@@ -24,7 +24,7 @@ import (
 )
 
 const (
-	appVersion        = "2.1.0"
+	appVersion        = "3.0.0"
 	maxPorts          = 32
 	maxAttempts       = uint64(2_000_000)
 	maxWorkers        = 512
@@ -196,8 +196,9 @@ func (s *jobStore) cancelAll() {
 }
 
 type app struct {
-	store   *jobStore
-	dataDir string
+	store    *jobStore
+	dataDir  string
+	settings *settingsStore
 }
 
 type startRequest struct {
@@ -277,8 +278,6 @@ func parseTarget(value string) (ipRange, error) {
 		size := uint64(1) << uint(32-bits)
 		start64 := uint64(start)
 		end64 := start64 + size - 1
-		// Match the former Python ipaddress.hosts() behavior: for prefixes
-		// /30 and larger networks, exclude network and broadcast addresses.
 		if bits <= 30 {
 			start64++
 			end64--
@@ -480,11 +479,8 @@ func executeScan(job *scanJob) {
 	limiter := newAttemptLimiter(job.rate)
 
 	go streamTargets(job.ctx, job.ranges, tasks)
-
 	writerDone := make(chan error, 1)
-	go func() {
-		writerDone <- writeResults(job, results)
-	}()
+	go func() { writerDone <- writeResults(job, results) }()
 
 	var workers sync.WaitGroup
 	workers.Add(job.workers)
@@ -600,6 +596,9 @@ func (a *app) handleInfo(w http.ResponseWriter, _ *http.Request) {
 		"version":             appVersion,
 		"runtime":             "go",
 		"recent_result_limit": recentResultLimit,
+		"cf_speed_bytes":      cfSpeedBytes,
+		"cf_top_limit":        cfSpeedTopLimit,
+		"cf_https_ports":      []int{443, 2053, 2083, 2087, 2096, 8443},
 	})
 }
 
@@ -630,9 +629,7 @@ func (a *app) handleStart(w http.ResponseWriter, r *http.Request) {
 	}
 	attempts := hostCount * uint64(len(ports))
 	if attempts > maxAttempts {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": fmt.Sprintf("scan contains %d connection attempts; limit is %d", attempts, maxAttempts),
-		})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("scan contains %d connection attempts; limit is %d", attempts, maxAttempts)})
 		return
 	}
 
@@ -643,29 +640,10 @@ func (a *app) handleStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	job := &scanJob{
-		id:        id,
-		ranges:    ranges,
-		hostCount: hostCount,
-		ports:     ports,
-		timeout:   time.Duration(clampFloat(request.Timeout, 0.05, 5, 0.8) * float64(time.Second)),
-		workers:   clampInt(request.Workers, 1, maxWorkers, defaultWorkers),
-		rate:      clampFloat(request.Rate, 1, maxRate, defaultRate),
-		startedAt: time.Now(),
-		csvPath:   csvPath,
-		ipsPath:   ipsPath,
-		ctx:       ctx,
-		cancel:    cancel,
-		status:    "queued",
-		recent:    make([]scanResult, recentResultLimit),
-	}
+	job := &scanJob{id: id, ranges: ranges, hostCount: hostCount, ports: ports, timeout: time.Duration(clampFloat(request.Timeout, 0.05, 5, 0.8) * float64(time.Second)), workers: clampInt(request.Workers, 1, maxWorkers, defaultWorkers), rate: clampFloat(request.Rate, 1, maxRate, defaultRate), startedAt: time.Now(), csvPath: csvPath, ipsPath: ipsPath, ctx: ctx, cancel: cancel, status: "queued", recent: make([]scanResult, recentResultLimit)}
 	a.store.put(job)
 	go executeScan(job)
-	writeJSON(w, http.StatusAccepted, map[string]any{
-		"id":       id,
-		"hosts":    hostCount,
-		"attempts": attempts,
-	})
+	writeJSON(w, http.StatusAccepted, map[string]any{"id": id, "hosts": hostCount, "attempts": attempts})
 }
 
 func (a *app) handleJob(w http.ResponseWriter, r *http.Request) {
@@ -700,8 +678,7 @@ func (a *app) handleExportCSV(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "job not found"})
 		return
 	}
-	name := "active-sniffer-" + time.Now().Format("20060102-150405") + ".csv"
-	a.serveFile(w, r, job.csvPath, name, "text/csv; charset=utf-8")
+	a.serveFile(w, r, job.csvPath, "active-sniffer-"+time.Now().Format("20060102-150405")+".csv", "text/csv; charset=utf-8")
 }
 
 func (a *app) handleExportTXT(w http.ResponseWriter, r *http.Request) {
@@ -710,8 +687,7 @@ func (a *app) handleExportTXT(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "job not found"})
 		return
 	}
-	name := "active-sniffer-ips-" + time.Now().Format("20060102-150405") + ".txt"
-	a.serveFile(w, r, job.ipsPath, name, "text/plain; charset=utf-8")
+	a.serveFile(w, r, job.ipsPath, "active-sniffer-ips-"+time.Now().Format("20060102-150405")+".txt", "text/plain; charset=utf-8")
 }
 
 func (a *app) routes() http.Handler {
@@ -736,23 +712,51 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("/api/vless/job", handleVLESSBenchJob)
 	mux.HandleFunc("/api/vless/cancel", handleVLESSBenchCancel)
 	mux.HandleFunc("/api/vless/export.csv", handleVLESSBenchExportCSV)
-	return mux
+	mux.HandleFunc("/api/cf-speed/start", handleCFSpeedStart)
+	mux.HandleFunc("/api/cf-speed/job", handleCFSpeedJob)
+	mux.HandleFunc("/api/cf-speed/cancel", handleCFSpeedCancel)
+	mux.HandleFunc("/api/cf-speed/export.csv", handleCFSpeedExportCSV)
+	mux.HandleFunc("/api/cloudflare/config", a.handleCloudflareConfig)
+	mux.HandleFunc("/api/cloudflare/update", a.handleCloudflareUpdate)
+	mux.HandleFunc("/api/ip/meta", handleIPMetadata)
+	return a.authMiddleware(mux)
 }
 
 func main() {
-	host := flag.String("host", "0.0.0.0", "listen address")
-	port := flag.Int("port", 8766, "WebUI listen port")
-	dataDir := flag.String("data-dir", filepath.Join(os.TempDir(), "active-ip-sniffer"), "result directory")
-	flag.Parse()
-	if *port < 1 || *port > 65535 {
-		log.Fatal("--port must be between 1 and 65535")
+	if isSetupInvocation(os.Args) {
+		if err := runSetupWizard(); err != nil {
+			log.Fatal(err)
+		}
+		return
 	}
-	if err := os.MkdirAll(*dataDir, 0o750); err != nil {
-		log.Fatalf("create data directory: %v", err)
+	args := os.Args[1:]
+	if len(args) > 0 && args[0] == "serve" {
+		args = args[1:]
 	}
-	cleanupResultDirectory(*dataDir, time.Now())
+	flags := flag.NewFlagSet("active-ip-sniffer", flag.ExitOnError)
+	host := flags.String("host", defaultListenHost, "listen address")
+	port := flags.Int("port", defaultListenPort, "WebUI listen port")
+	dataDir := flags.String("data-dir", defaultDataDir(), "result directory")
+	configPath := flags.String("config", defaultConfigPath(), "persistent configuration file")
+	_ = flags.Parse(args)
+	if err := runServer(*host, *port, *dataDir, *configPath); err != nil {
+		log.Fatal(err)
+	}
+}
 
-	application := &app{store: newJobStore(), dataDir: *dataDir}
+func runServer(host string, port int, dataDir, configPath string) error {
+	if port < 1 || port > 65535 {
+		return errors.New("--port must be between 1 and 65535")
+	}
+	if err := os.MkdirAll(dataDir, 0o750); err != nil {
+		return fmt.Errorf("create data directory: %w", err)
+	}
+	cleanupResultDirectory(dataDir, time.Now())
+	settings, err := newSettingsStore(configPath)
+	if err != nil {
+		return fmt.Errorf("load config %s: %w", configPath, err)
+	}
+	application := &app{store: newJobStore(), dataDir: dataDir, settings: settings}
 	cleanupStop := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(time.Hour)
@@ -764,32 +768,28 @@ func main() {
 			case now := <-ticker.C:
 				application.store.cleanupOld(now)
 				vlessBenchJobs.cleanupOld(now)
-				cleanupResultDirectory(*dataDir, now)
+				cfSpeedJobs.cleanupOld(now)
+				cleanupResultDirectory(dataDir, now)
 			}
 		}
 	}()
-
-	address := net.JoinHostPort(*host, strconv.Itoa(*port))
-	server := &http.Server{
-		Addr:              address,
-		Handler:           application.routes(),
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       60 * time.Second,
-	}
+	address := net.JoinHostPort(host, strconv.Itoa(port))
+	server := &http.Server{Addr: address, Handler: application.routes(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 	log.Printf("Active IP Sniffer %s (Go): http://%s", appVersion, address)
-	log.Printf("results: %s", *dataDir)
+	log.Printf("results: %s", dataDir)
+	log.Printf("config: %s", configPath)
 	log.Printf("Use only on networks you own or are explicitly authorized to assess.")
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatal(err)
+		return err
 	}
 	close(cleanupStop)
 	application.store.cancelAll()
 	vlessBenchJobs.cancelAll()
+	cfSpeedJobs.cancelAll()
+	return nil
 }
 
-const indexHTML = `<!doctype html>
+const legacyIndexHTML = `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Active IP Sniffer</title>
 <style>
@@ -808,7 +808,6 @@ const indexHTML = `<!doctype html>
   </div></section>
   <section id="progressCard" class="card hidden"><h2>进度</h2><div class="body"><div class="metric"><strong id="found">发现 0 个 IP</strong><div class="track"><div id="fill" class="fill"></div></div><span id="pct">0%</span></div><div id="status" class="muted" style="margin-top:10px">等待扫描</div></div></section>
   <section id="resultCard" class="card hidden"><h2>结果</h2><div class="body actions"><span id="resultMeta" class="muted"></span><div class="row"><button id="sendToBench" class="btn secondary" disabled>填入 VLESS 测试</button><button id="copy" class="btn secondary" disabled>复制全部 IP</button><button id="export" class="btn secondary" disabled>导出 CSV</button></div></div><div class="table-wrap"><table><thead><tr><th>#</th><th>IP</th><th>开放端口</th></tr></thead><tbody id="rows"></tbody></table></div></section>
-
   <section class="card"><h2>VLESS Endpoint Bench</h2><div class="body grid">
     <div class="field s6"><label>候选 IPv4（每行或逗号分隔）</label><textarea id="benchTargets" placeholder="8.217.238.203&#10;8.210.214.167&#10;47.242.87.115"></textarea></div>
     <div class="field s6"><label>VLESS TLS+WS 连接</label><input id="benchURI" type="password" autocomplete="off" placeholder="vless://UUID@IP:443?...&security=tls&type=ws&host=...&path=..."><div style="height:10px"></div><div class="notice">候选 IP 只替换连接地址；UUID、端口、SNI、Host、Path 全部沿用 VLESS 链接。测试依次验证 TCP → TLS/WS 101 → VLESS 实际出站 → speed.cloudflare.com 下载。测速串行执行，避免多个候选同时抢带宽。VLESS 链接仅保存在本次任务内存中，不写 CSV、不写日志。</div></div>
