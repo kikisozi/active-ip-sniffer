@@ -463,7 +463,7 @@ ReadWritePaths=%s %s
 
 [Install]
 WantedBy=multi-user.target
-`, serviceArg(exe), serviceArg(cfg.Host), cfg.Port, serviceArg(cfg.DataDir), serviceArg(configPath), serviceArg(filepath.Dir(exe)), serviceArg(cfg.DataDir), serviceArg(filepath.Dir(configPath)))
+`, exe, cfg.Host, cfg.Port, cfg.DataDir, configPath, filepath.Dir(exe), cfg.DataDir, filepath.Dir(configPath))
 	servicePath := filepath.Join("/etc/systemd/system", linuxServiceName+".service")
 	if err := os.WriteFile(servicePath, []byte(unit), 0o644); err != nil {
 		return fmt.Errorf("写入 systemd 服务失败: %w", err)
@@ -475,14 +475,6 @@ WantedBy=multi-user.target
 		}
 	}
 	return nil
-}
-
-func systemdQuote(value string) string {
-	return `"` + strings.ReplaceAll(value, `"`, `\"`) + `"`
-}
-
-func serviceArg(value string) string {
-	return strconv.Quote(value)
 }
 
 func openFirewallPort(port int) error {
