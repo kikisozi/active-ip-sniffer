@@ -34,9 +34,16 @@ TCP 扫描结果区提供“填入 VLESS 测试”按钮，会读取本次任务
 
 VLESS URI 仅用于当前内存任务：不会写入扫描结果文件、不会出现在测速 CSV、程序也不会主动把 URI 写入日志。测速 CSV 只包含候选 IP、各阶段延迟、吞吐量和失败阶段。
 
+## v3.4.1：探针兼容修复 / Auto WARP 40099
+
+- 修复旧版 `v probe` 对 `/api/egress/check` 返回纯文本 404 时，浏览器错误显示 `Unexpected non-whitespace character after JSON` 的问题。现在会识别非 JSON/404，并明确提示本地探针版本过旧。
+- 出口新增 **Auto（默认）**：在当前检测来源（服务器后端或本地探针）上先验证 `127.0.0.1:40099`，仅当 Cloudflare Trace 返回 `warp=on/plus` 才使用 WARP；否则自动回落 Direct。每个任务只在启动时解析一次出口，不会中途切换。
+- Linux/Windows 安装器附带 WARP helper：`v warp on` 一键安装/配置 Cloudflare One Client Local Proxy 到 `40099`，`v warp status` 检查，`v warp off` 断开。新装时也可使用 `AIS_INSTALL_WARP=1` 自动启用。
+- WARP Local Proxy 仍是可选能力；不支持官方 WARP 客户端的平台会保持 Direct。由于 Cloudflare Local proxy 单请求有超时限制，慢线路上的大文件精测仍建议使用 Direct 做运营商排名。
+
 ## v3.4：WARP 可选出口 / 用户测速 / 智能 DNS
 
-- 服务器后端与本地 `v probe` 都支持 **Direct / WARP Local Proxy** 两种测试出口。WARP 模式使用本机 SOCKS5 Local Proxy（默认 `127.0.0.1:40000`），只代理本程序发起的 TCP/CF/VLESS 外层连接，不强制修改整机默认路由。
+- 服务器后端与本地 `v probe` 都支持 **Direct / WARP Local Proxy** 两种测试出口。WARP 模式使用本机 SOCKS5 Local Proxy（默认 `127.0.0.1:40099`），只代理本程序发起的 TCP/CF/VLESS 外层连接，不强制修改整机默认路由。
 - 新增独立用户测速 WebUI，默认端口 `18768`，与总控管理端口分离。总控可以把当前 CF Top 候选发布给用户；用户网页连接自己电脑上的 `v probe`，从用户真实网络出口运行 1 MB / 2 秒快筛和较轻量的 20 MB 精测，然后仅把 Top 5 回传总控。
 - 总控“用户测速 / 智能 DNS”页按提交者 IP 的地区/ASN/ISP 展示结果，点击提交者可展开其 Top 5。
 - 最近 7 天用户提交会按电信、联通、移动和默认线路聚合，自动计算每个候选 IP 的峰值速度中位数、峰值均值、平均速度中位数与样本数；智能 DNS 计划优先按峰值中位数排序，降低单次异常峰值的影响。WARP/系统 WARP 提交不会进入自动 DNS 计划，只保留供人工比较。

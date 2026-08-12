@@ -779,9 +779,14 @@ func handleVLESSBenchStart(w http.ResponseWriter, r *http.Request) {
 	}
 	timeoutSeconds := clampFloat(request.Timeout, 2, 20, 12)
 	timeout := time.Duration(timeoutSeconds * float64(time.Second))
-	egress, err := normalizeEgress(request.EgressMode, request.WARPProxy)
+	requestedEgress, err := normalizeEgress(request.EgressMode, request.WARPProxy)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	egress, _, err := resolveEgress(r.Context(), requestedEgress)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
 	vlessBenchJobs.cleanupOld(time.Now())
@@ -791,11 +796,12 @@ func handleVLESSBenchStart(w http.ResponseWriter, r *http.Request) {
 	vlessBenchJobs.put(job)
 	go executeVLESSBench(job, cfg, candidates, int64(bytesMB)*1_000_000, timeout, egress)
 	writeJSON(w, http.StatusAccepted, map[string]any{
-		"id":          id,
-		"candidates":  len(candidates),
-		"bytes_mb":    bytesMB,
-		"target":      vlessBenchDefaultTarget,
-		"egress_mode": egress.Mode,
+		"id":                    id,
+		"candidates":            len(candidates),
+		"bytes_mb":              bytesMB,
+		"target":                vlessBenchDefaultTarget,
+		"requested_egress_mode": requestedEgress.Mode,
+		"egress_mode":           egress.Mode,
 	})
 }
 

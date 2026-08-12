@@ -117,17 +117,28 @@ func handleEgressCheck(role string) http.HandlerFunc {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request: " + err.Error()})
 			return
 		}
-		egress, err := normalizeEgress(request.Mode, request.WARPProxy)
+		requested, err := normalizeEgress(request.Mode, request.WARPProxy)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		info := queryCloudflareTrace(r.Context(), egress)
+		selected, info, err := resolveEgress(r.Context(), requested)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
 		if info.IP == "" {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "cannot reach Cloudflare trace through selected egress"})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"role": role, "mode": egress.Mode, "proxy": egress.WARPProxy, "egress": info})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"role":           role,
+			"requested_mode": requested.Mode,
+			"mode":           selected.Mode,
+			"proxy":          selected.WARPProxy,
+			"auto_fallback":  requested.Mode == "auto" && selected.Mode == "direct",
+			"egress":         info,
+		})
 	}
 }
 

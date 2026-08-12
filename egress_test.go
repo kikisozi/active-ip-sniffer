@@ -9,6 +9,19 @@ import (
 	"time"
 )
 
+func TestNormalizeEgressAutoDefault(t *testing.T) {
+	egress, err := normalizeEgress("", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if egress.Mode != "auto" || egress.WARPProxy != "127.0.0.1:40099" {
+		t.Fatalf("unexpected auto egress: %#v", egress)
+	}
+	if !warpTraceActive(egressInfo{IP: "198.51.100.1", WARP: "on"}) || warpTraceActive(egressInfo{IP: "198.51.100.1", WARP: "off"}) {
+		t.Fatal("unexpected WARP trace classification")
+	}
+}
+
 func TestWARPSOCKS5Dial(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

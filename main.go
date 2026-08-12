@@ -24,7 +24,7 @@ import (
 )
 
 const (
-	appVersion        = "3.4.0"
+	appVersion        = "3.4.1"
 	maxPorts          = 32
 	maxAttempts       = uint64(2_000_000)
 	maxWorkers        = 512
@@ -604,6 +604,10 @@ func (a *app) handleInfo(w http.ResponseWriter, _ *http.Request) {
 		"cf_speed_bytes":      cfSpeedBytes,
 		"cf_top_limit":        cfSpeedTopLimit,
 		"cf_https_ports":      []int{443, 2053, 2083, 2087, 2096, 8443},
+		"probe_port":          defaultProbePort,
+		"default_egress_mode": "auto",
+		"warp_proxy":          defaultWARPProxy,
+		"egress_auto":         true,
 	}
 	if a.settings != nil {
 		cfg := a.settings.snapshot()
@@ -638,9 +642,14 @@ func (a *app) handleStart(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	egress, err := normalizeEgress(request.EgressMode, request.WARPProxy)
+	requestedEgress, err := normalizeEgress(request.EgressMode, request.WARPProxy)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	egress, _, err := resolveEgress(r.Context(), requestedEgress)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
 	attempts := hostCount * uint64(len(ports))
@@ -659,7 +668,7 @@ func (a *app) handleStart(w http.ResponseWriter, r *http.Request) {
 	job := &scanJob{id: id, ranges: ranges, hostCount: hostCount, ports: ports, timeout: time.Duration(clampFloat(request.Timeout, 0.05, 5, 0.8) * float64(time.Second)), workers: clampInt(request.Workers, 1, maxWorkers, defaultWorkers), rate: clampFloat(request.Rate, 1, maxRate, defaultRate), egress: egress, startedAt: time.Now(), csvPath: csvPath, ipsPath: ipsPath, ctx: ctx, cancel: cancel, status: "queued", recent: make([]scanResult, recentResultLimit)}
 	a.store.put(job)
 	go executeScan(job)
-	writeJSON(w, http.StatusAccepted, map[string]any{"id": id, "hosts": hostCount, "attempts": attempts})
+	writeJSON(w, http.StatusAccepted, map[string]any{"id": id, "hosts": hostCount, "attempts": attempts, "requested_egress_mode": requestedEgress.Mode, "egress_mode": egress.Mode})
 }
 
 func (a *app) handleJob(w http.ResponseWriter, r *http.Request) {
