@@ -52,7 +52,11 @@ finally {
 
 @"
 @echo off
-"%~dp0active-ip-sniffer.exe" setup %*
+if /I "%~1"=="probe" (
+  "%~dp0active-ip-sniffer.exe" %*
+) else (
+  "%~dp0active-ip-sniffer.exe" setup %*
+)
 "@ | Set-Content -Encoding ASCII -Path $VCmd
 
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
@@ -69,6 +73,7 @@ if (-not (($env:Path.Split(';')) | Where-Object { $_.TrimEnd('\') -ieq $AppDir.T
 Write-Host ""
 Write-Host "Active IP Sniffer installed: $Exe"
 Write-Host "From now on, enter v in PowerShell or CMD to open the configuration UI."
+Write-Host "Run v probe to start the localhost probe used by the remote WebUI."
 Write-Host "Windows uses one-time foreground mode; closing it stops the service."
 Write-Host ""
 

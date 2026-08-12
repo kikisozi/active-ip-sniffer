@@ -45,6 +45,16 @@ VLESS URI 仅用于当前内存任务：不会写入扫描结果文件、不会�
 - CF Top 20 可一键送入 VLESS End-to-End 测试；单个结果也可以直接进入 VLESS 测试。
 - Cloudflare Token 保存在服务器配置文件，不回传明文给 WebUI，也不会写入测速 CSV。
 
+## v3.1：本地探针 / 当前出口 / Alpine
+
+- WebUI 顶部显示访问者 IP、服务器默认公网出口、当前检测/测速出口，以及 Cloudflare Trace 返回的 WARP/Colo 状态。
+- 检测来源可在 **服务器后端** 与 **本地探针**之间切换。服务器模式的 TCP、CF 100 MB、VLESS 测试由服务器发起；本地探针模式则从用户自己的 Windows/Linux/Alpine 机器发起。
+- 本地探针仅监听 `127.0.0.1:18767`，每次启动随机生成 Probe Token；浏览器必须携带 Token 才能调用扫描/测速 API。Token 只保存在当前浏览器标签页的 `sessionStorage`，不会提交给中央 WebUI。
+- 浏览器访问 WebUI 后点击“本地探针配置教程”即可看到 Linux/Alpine、Windows 的完整安装与连接步骤。
+- Linux 安装脚本改为 POSIX `sh`，增加 `apk`、`zypper`、`pacman` 包管理器支持；常驻模式自动检测 systemd 或 OpenRC，Alpine 可使用 OpenRC 常驻。
+
+> 顶部“当前检测 / 测速出口”来自当前机器访问外部网络时的默认公网出口。若 WARP/VPN 对特定目标设置了 Split Tunnel，某个目标的实际路由仍可能与默认出口不同。
+
 ## 资源建议
 
 对于 **128 MB RAM**：
@@ -62,7 +72,7 @@ VLESS URI 仅用于当前内存任务：不会写入扫描结果文件、不会�
 首次只需要一条命令：
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/kikisozi/active-ip-sniffer/main/install.sh?cb=$(date +%s)" | sudo bash
+curl -fsSL "https://raw.githubusercontent.com/kikisozi/active-ip-sniffer/main/install.sh?cb=$(date +%s)" | sudo sh
 ```
 
 安装脚本只负责下载并校验 Go 单二进制，随后进入 **Go 编写的交互配置界面**。可交互选择：
@@ -106,6 +116,44 @@ systemctl status active-ip-sniffer
 systemctl restart active-ip-sniffer
 journalctl -u active-ip-sniffer -f
 ```
+
+Alpine/OpenRC 使用：
+
+```sh
+rc-service active-ip-sniffer status
+rc-service active-ip-sniffer restart
+rc-update show | grep active-ip-sniffer
+```
+
+如果 Alpine 系统没有 `sudo`，以 root 登录后可直接执行：
+
+```sh
+curl -fsSL "https://raw.githubusercontent.com/kikisozi/active-ip-sniffer/main/install.sh?cb=$(date +%s)" | sh
+```
+
+## 本地探针模式
+
+已安装本项目后，在**需要承担实际扫描/测速流量的那台机器**运行：
+
+```text
+v probe
+```
+
+探针会输出：
+
+```text
+Active IP Sniffer 3.1.0 local probe: http://127.0.0.1:18767
+Local probe token: <随机 Token>
+```
+
+保持终端运行，在中央 WebUI 点击“本地探针配置教程”，把 Token 粘贴进去并连接。连接成功后，将“检测来源”切换为“本地探针”。此时：
+
+- TCP 扫描连接由本地探针发出；
+- CF Direct 的每个 `99,999,999 bytes` 下载由本地探针下载；
+- VLESS Endpoint Bench 的 TCP/TLS/WS/VLESS/下载全部由本地探针执行；
+- Cloudflare DNS Token 与 DNS 更新仍由中央 WebUI 服务器管理，不会传给本地探针。
+
+因此，**测速一定会消耗执行测速那台机器的网络流量**。服务器模式会消耗服务器/VPS 的月流量；本地探针模式会消耗用户本机或本地 VPS 的流量。WARP/VPN 只改变出口路径，不能把这些字节从宿主机流量统计中“消失”。
 
 ## Windows PowerShell 一键安装
 

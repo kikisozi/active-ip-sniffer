@@ -412,17 +412,22 @@ func runSetupWizard() error {
 		return errors.New("Linux 配置应用需要 root；请使用 sudo v")
 	}
 	if cfg.Mode == "daemon" {
-		if err := installSystemdService(cfg, configPath); err != nil {
+		manager, err := installPersistentService(cfg, configPath)
+		if err != nil {
 			return err
 		}
 		if cfg.Firewall {
 			_ = openFirewallPort(cfg.Port)
 		}
 		fmt.Printf("常驻服务已启动: http://%s:%d\n", displayHost(cfg.Host), cfg.Port)
-		fmt.Printf("状态命令: systemctl status %s\n", linuxServiceName)
+		if manager == "openrc" {
+			fmt.Printf("状态命令: rc-service %s status\n", linuxServiceName)
+		} else {
+			fmt.Printf("状态命令: systemctl status %s\n", linuxServiceName)
+		}
 		return nil
 	}
-	_ = exec.Command("systemctl", "disable", "--now", linuxServiceName).Run()
+	disablePersistentService()
 	fmt.Printf("单次模式启动: http://%s:%d\n", displayHost(cfg.Host), cfg.Port)
 	fmt.Println("按 Ctrl+C 停止。")
 	return runServer(cfg.Host, cfg.Port, cfg.DataDir, configPath)
@@ -473,6 +478,74 @@ WantedBy=multi-user.target
 		if output, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("systemctl %s 失败: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
 		}
+	}
+	return nil
+}
+
+func installPersistentService(cfg persistedConfig, configPath string) (string, error) {
+	if _, err := exec.LookPath("systemctl"); err == nil {
+		if err := installSystemdService(cfg, configPath); err != nil {
+			return "systemd", err
+		}
+		return "systemd", nil
+	}
+	if _, err := exec.LookPath("rc-service"); err == nil {
+		if _, err := exec.LookPath("rc-update"); err != nil {
+			return "", errors.New("检测到 OpenRC，但缺少 rc-update")
+		}
+		if err := installOpenRCService(cfg, configPath); err != nil {
+			return "openrc", err
+		}
+		return "openrc", nil
+	}
+	return "", errors.New("未找到受支持的服务管理器：需要 systemd 或 OpenRC")
+}
+
+func disablePersistentService() {
+	if _, err := exec.LookPath("systemctl"); err == nil {
+		_ = exec.Command("systemctl", "disable", "--now", linuxServiceName).Run()
+		return
+	}
+	if _, err := exec.LookPath("rc-service"); err == nil {
+		_ = exec.Command("rc-service", linuxServiceName, "stop").Run()
+		_ = exec.Command("rc-update", "del", linuxServiceName, "default").Run()
+	}
+}
+
+func installOpenRCService(cfg persistedConfig, configPath string) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	exe, _ = filepath.Abs(exe)
+	script := fmt.Sprintf(`#!/sbin/openrc-run
+description="Active IP Sniffer Go WebUI (CF / VLESS / DNS)"
+command=%q
+command_args=%q
+command_background=true
+pidfile="/run/active-ip-sniffer.pid"
+directory=%q
+export GOMEMLIMIT="80MiB"
+export GOGC="50"
+
+depend() {
+    need net
+    after firewall
+}
+`, exe, fmt.Sprintf("serve -host %s -port %d -data-dir %s -config %s", cfg.Host, cfg.Port, cfg.DataDir, configPath), filepath.Dir(exe))
+	servicePath := filepath.Join("/etc/init.d", linuxServiceName)
+	if err := os.WriteFile(servicePath, []byte(script), 0o755); err != nil {
+		return fmt.Errorf("写入 OpenRC 服务失败: %w", err)
+	}
+	if err := os.Chmod(servicePath, 0o755); err != nil {
+		return fmt.Errorf("设置 OpenRC 服务权限失败: %w", err)
+	}
+	if output, err := exec.Command("rc-update", "add", linuxServiceName, "default").CombinedOutput(); err != nil {
+		return fmt.Errorf("rc-update add 失败: %v: %s", err, strings.TrimSpace(string(output)))
+	}
+	_ = exec.Command("rc-service", linuxServiceName, "stop").Run()
+	if output, err := exec.Command("rc-service", linuxServiceName, "start").CombinedOutput(); err != nil {
+		return fmt.Errorf("rc-service start 失败: %v: %s", err, strings.TrimSpace(string(output)))
 	}
 	return nil
 }

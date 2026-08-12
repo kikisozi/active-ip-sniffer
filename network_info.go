@@ -1,0 +1,130 @@
+package main
+
+import (
+	"bufio"
+	"context"
+	"io"
+	"net"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+)
+
+type egressInfo struct {
+	IP     string `json:"ip"`
+	WARP   string `json:"warp"`
+	Colo   string `json:"colo,omitempty"`
+	Source string `json:"source,omitempty"`
+}
+
+type cachedEgress struct {
+	mu      sync.Mutex
+	value   egressInfo
+	expires time.Time
+}
+
+var egressCache cachedEgress
+
+func requestClientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err == nil {
+		return host
+	}
+	return strings.TrimSpace(r.RemoteAddr)
+}
+
+func currentEgressInfo(ctx context.Context) egressInfo {
+	now := time.Now()
+	egressCache.mu.Lock()
+	defer egressCache.mu.Unlock()
+	if now.Before(egressCache.expires) && egressCache.value.IP != "" {
+		return egressCache.value
+	}
+
+	value := queryCloudflareTrace(ctx)
+	if value.IP == "" {
+		value = queryPublicIPv4(ctx)
+	}
+	if value.WARP == "" {
+		value.WARP = "unknown"
+	}
+	egressCache.value = value
+	egressCache.expires = now.Add(45 * time.Second)
+	return value
+}
+
+func queryCloudflareTrace(ctx context.Context) egressInfo {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://www.cloudflare.com/cdn-cgi/trace", nil)
+	if err != nil {
+		return egressInfo{}
+	}
+	req.Header.Set("User-Agent", "Active-IP-Sniffer/"+appVersion)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return egressInfo{}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
+		return egressInfo{}
+	}
+	info := egressInfo{Source: "cloudflare-trace"}
+	scanner := bufio.NewScanner(io.LimitReader(resp.Body, 16*1024))
+	for scanner.Scan() {
+		key, value, ok := strings.Cut(scanner.Text(), "=")
+		if !ok {
+			continue
+		}
+		switch strings.TrimSpace(key) {
+		case "ip":
+			info.IP = strings.TrimSpace(value)
+		case "warp":
+			info.WARP = strings.TrimSpace(value)
+		case "colo":
+			info.Colo = strings.TrimSpace(value)
+		}
+	}
+	return info
+}
+
+func queryPublicIPv4(ctx context.Context) egressInfo {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api4.ipify.org", nil)
+	if err != nil {
+		return egressInfo{}
+	}
+	req.Header.Set("User-Agent", "Active-IP-Sniffer/"+appVersion)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return egressInfo{}
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 256))
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return egressInfo{}
+	}
+	ip := strings.TrimSpace(string(body))
+	if net.ParseIP(ip) == nil {
+		return egressInfo{}
+	}
+	return egressInfo{IP: ip, WARP: "unknown", Source: "ipify"}
+}
+
+func handleNetworkInfo(role string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		info := currentEgressInfo(r.Context())
+		writeJSON(w, http.StatusOK, map[string]any{
+			"role":       role,
+			"visitor_ip": requestClientIP(r),
+			"egress":     info,
+		})
+	}
+}

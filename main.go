@@ -24,7 +24,7 @@ import (
 )
 
 const (
-	appVersion        = "3.0.0"
+	appVersion        = "3.1.0"
 	maxPorts          = 32
 	maxAttempts       = uint64(2_000_000)
 	maxWorkers        = 512
@@ -703,6 +703,7 @@ func (a *app) routes() http.Handler {
 		_, _ = w.Write([]byte(indexHTML))
 	})
 	mux.HandleFunc("/api/info", a.handleInfo)
+	mux.HandleFunc("/api/network-info", handleNetworkInfo("server"))
 	mux.HandleFunc("/api/scan/start", a.handleStart)
 	mux.HandleFunc("/api/scan/job", a.handleJob)
 	mux.HandleFunc("/api/scan/cancel", a.handleCancel)
@@ -723,6 +724,17 @@ func (a *app) routes() http.Handler {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "probe" {
+		flags := flag.NewFlagSet("active-ip-sniffer probe", flag.ExitOnError)
+		host := flags.String("host", "127.0.0.1", "local probe listen address; loopback only")
+		port := flags.Int("port", defaultProbePort, "local probe listen port")
+		token := flags.String("token", "", "optional local probe token; generated when empty")
+		_ = flags.Parse(os.Args[2:])
+		if err := runProbeServer(*host, *port, *token); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	if isSetupInvocation(os.Args) {
 		if err := runSetupWizard(); err != nil {
 			log.Fatal(err)
