@@ -24,7 +24,7 @@ import (
 )
 
 const (
-	appVersion        = "3.3.0"
+	appVersion        = "3.4.0"
 	maxPorts          = 32
 	maxAttempts       = uint64(2_000_000)
 	maxWorkers        = 512
@@ -53,6 +53,7 @@ type scanJob struct {
 	timeout   time.Duration
 	workers   int
 	rate      float64
+	egress    egressConfig
 	startedAt time.Time
 	csvPath   string
 	ipsPath   string
@@ -199,14 +200,17 @@ type app struct {
 	store    *jobStore
 	dataDir  string
 	settings *settingsStore
+	public   *publicBenchmarkStore
 }
 
 type startRequest struct {
-	Targets []string `json:"targets"`
-	Ports   []int    `json:"ports"`
-	Timeout float64  `json:"timeout"`
-	Workers int      `json:"workers"`
-	Rate    float64  `json:"rate"`
+	Targets    []string `json:"targets"`
+	Ports      []int    `json:"ports"`
+	Timeout    float64  `json:"timeout"`
+	Workers    int      `json:"workers"`
+	Rate       float64  `json:"rate"`
+	EgressMode string   `json:"egress_mode,omitempty"`
+	WARPProxy  string   `json:"warp_proxy,omitempty"`
 }
 
 type attemptLimiter struct {
@@ -402,9 +406,8 @@ func clampInt(value, low, high, fallback int) int {
 	return value
 }
 
-func tcpReachable(ctx context.Context, ip string, port int, timeout time.Duration) bool {
-	dialer := net.Dialer{Timeout: timeout}
-	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(ip, strconv.Itoa(port)))
+func tcpReachable(ctx context.Context, ip string, port int, timeout time.Duration, egress egressConfig) bool {
+	conn, err := egress.dialContext(ctx, "tcp", net.JoinHostPort(ip, strconv.Itoa(port)), timeout)
 	if err != nil {
 		return false
 	}
@@ -501,7 +504,7 @@ func executeScan(job *scanJob) {
 						if !limiter.wait(job.ctx) {
 							return
 						}
-						if tcpReachable(job.ctx, ip, port, job.timeout) {
+						if tcpReachable(job.ctx, ip, port, job.timeout, job.egress) {
 							open = append(open, port)
 						}
 						job.done.Add(1)
@@ -592,7 +595,7 @@ func (a *app) serveFile(w http.ResponseWriter, r *http.Request, path, filename, 
 }
 
 func (a *app) handleInfo(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
+	info := map[string]any{
 		"version":             appVersion,
 		"runtime":             "go",
 		"recent_result_limit": recentResultLimit,
@@ -601,7 +604,13 @@ func (a *app) handleInfo(w http.ResponseWriter, _ *http.Request) {
 		"cf_speed_bytes":      cfSpeedBytes,
 		"cf_top_limit":        cfSpeedTopLimit,
 		"cf_https_ports":      []int{443, 2053, 2083, 2087, 2096, 8443},
-	})
+	}
+	if a.settings != nil {
+		cfg := a.settings.snapshot()
+		info["public_enabled"] = cfg.PublicEnabled
+		info["public_port"] = cfg.PublicPort
+	}
+	writeJSON(w, http.StatusOK, info)
 }
 
 func (a *app) handleStart(w http.ResponseWriter, r *http.Request) {
@@ -629,6 +638,11 @@ func (a *app) handleStart(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	egress, err := normalizeEgress(request.EgressMode, request.WARPProxy)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
 	attempts := hostCount * uint64(len(ports))
 	if attempts > maxAttempts {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("scan contains %d connection attempts; limit is %d", attempts, maxAttempts)})
@@ -642,7 +656,7 @@ func (a *app) handleStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	job := &scanJob{id: id, ranges: ranges, hostCount: hostCount, ports: ports, timeout: time.Duration(clampFloat(request.Timeout, 0.05, 5, 0.8) * float64(time.Second)), workers: clampInt(request.Workers, 1, maxWorkers, defaultWorkers), rate: clampFloat(request.Rate, 1, maxRate, defaultRate), startedAt: time.Now(), csvPath: csvPath, ipsPath: ipsPath, ctx: ctx, cancel: cancel, status: "queued", recent: make([]scanResult, recentResultLimit)}
+	job := &scanJob{id: id, ranges: ranges, hostCount: hostCount, ports: ports, timeout: time.Duration(clampFloat(request.Timeout, 0.05, 5, 0.8) * float64(time.Second)), workers: clampInt(request.Workers, 1, maxWorkers, defaultWorkers), rate: clampFloat(request.Rate, 1, maxRate, defaultRate), egress: egress, startedAt: time.Now(), csvPath: csvPath, ipsPath: ipsPath, ctx: ctx, cancel: cancel, status: "queued", recent: make([]scanResult, recentResultLimit)}
 	a.store.put(job)
 	go executeScan(job)
 	writeJSON(w, http.StatusAccepted, map[string]any{"id": id, "hosts": hostCount, "attempts": attempts})
@@ -706,6 +720,7 @@ func (a *app) routes() http.Handler {
 	})
 	mux.HandleFunc("/api/info", a.handleInfo)
 	mux.HandleFunc("/api/network-info", handleNetworkInfo("server"))
+	mux.HandleFunc("/api/egress/check", handleEgressCheck("server"))
 	mux.HandleFunc("/api/scan/start", a.handleStart)
 	mux.HandleFunc("/api/scan/job", a.handleJob)
 	mux.HandleFunc("/api/scan/cancel", a.handleCancel)
@@ -723,6 +738,11 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("/api/cloudflare/update", a.handleCloudflareUpdate)
 	mux.HandleFunc("/api/ip/meta", handleIPMetadata)
 	mux.HandleFunc("/api/candidates/import", handleCandidateCSVImport)
+	mux.HandleFunc("/api/public/publish", a.handlePublicPublish)
+	mux.HandleFunc("/api/public/submissions", a.handlePublicSubmissions)
+	mux.HandleFunc("/api/public/smart-plan", a.handleSmartDNSPlan)
+	mux.HandleFunc("/api/dnspod/config", a.handleDNSPodConfig)
+	mux.HandleFunc("/api/dnspod/apply", a.handleDNSPodApply)
 	return a.authMiddleware(mux)
 }
 
@@ -772,7 +792,7 @@ func runServer(host string, port int, dataDir, configPath string) error {
 	if err != nil {
 		return fmt.Errorf("load config %s: %w", configPath, err)
 	}
-	application := &app{store: newJobStore(), dataDir: dataDir, settings: settings}
+	application := &app{store: newJobStore(), dataDir: dataDir, settings: settings, public: newPublicBenchmarkStore(dataDir)}
 	cleanupStop := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(time.Hour)
@@ -789,20 +809,76 @@ func runServer(host string, port int, dataDir, configPath string) error {
 			}
 		}
 	}()
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		var lastAttempt time.Time
+		for {
+			select {
+			case <-cleanupStop:
+				return
+			case now := <-ticker.C:
+				cfg := settings.snapshot().DNSPod
+				if !cfg.AutoApply || !cfg.configured() || (!lastAttempt.IsZero() && now.Sub(lastAttempt) < time.Duration(cfg.IntervalMinutes)*time.Minute) {
+					continue
+				}
+				lastAttempt = now
+				plans := application.public.smartPlan(cfg.TopN)
+				ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+				changes, applyErr := applyDNSPodPlan(ctx, cfg, plans)
+				cancel()
+				if applyErr != nil {
+					log.Printf("DNSPod auto apply skipped/failed: %v", applyErr)
+					continue
+				}
+				log.Printf("DNSPod smart DNS auto apply: %d change(s)", len(changes))
+			}
+		}
+	}()
 	address := net.JoinHostPort(host, strconv.Itoa(port))
-	server := &http.Server{Addr: address, Handler: application.routes(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
+	adminServer := &http.Server{Addr: address, Handler: application.routes(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
+	cfg := settings.snapshot()
+	var publicServer *http.Server
+	if cfg.PublicEnabled {
+		if cfg.PublicPort == port {
+			close(cleanupStop)
+			return errors.New("public benchmark port must differ from admin WebUI port")
+		}
+		publicAddress := net.JoinHostPort(host, strconv.Itoa(cfg.PublicPort))
+		publicServer = &http.Server{Addr: publicAddress, Handler: application.publicRoutes(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
+		log.Printf("Public benchmark WebUI: http://%s", publicAddress)
+	}
 	log.Printf("Active IP Sniffer %s (Go): http://%s", appVersion, address)
 	log.Printf("results: %s", dataDir)
 	log.Printf("config: %s", configPath)
 	log.Printf("Use only on networks you own or are explicitly authorized to assess.")
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return err
+	errCh := make(chan error, 2)
+	serve := func(name string, server *http.Server) {
+		err := server.ListenAndServe()
+		if errors.Is(err, http.ErrServerClosed) {
+			err = nil
+		}
+		if err != nil {
+			err = fmt.Errorf("%s listener: %w", name, err)
+		}
+		errCh <- err
 	}
+	go serve("admin", adminServer)
+	if publicServer != nil {
+		go serve("public", publicServer)
+	}
+	serverErr := <-errCh
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	_ = adminServer.Shutdown(shutdownCtx)
+	if publicServer != nil {
+		_ = publicServer.Shutdown(shutdownCtx)
+	}
+	shutdownCancel()
 	close(cleanupStop)
 	application.store.cancelAll()
 	vlessBenchJobs.cancelAll()
 	cfSpeedJobs.cancelAll()
-	return nil
+	return serverErr
 }
 
 const legacyIndexHTML = `<!doctype html>

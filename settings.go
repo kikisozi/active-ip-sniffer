@@ -25,6 +25,7 @@ const (
 	linuxServiceName  = "active-ip-sniffer"
 	defaultListenHost = "0.0.0.0"
 	defaultListenPort = 8766
+	defaultPublicPort = 18768
 )
 
 type cloudflareSettings struct {
@@ -32,14 +33,56 @@ type cloudflareSettings struct {
 	Domains []string `json:"domains,omitempty"`
 }
 
+type dnsPodSettings struct {
+	SecretID        string `json:"secret_id,omitempty"`
+	SecretKey       string `json:"secret_key,omitempty"`
+	Domain          string `json:"domain,omitempty"`
+	SubDomain       string `json:"subdomain,omitempty"`
+	TTL             int    `json:"ttl,omitempty"`
+	TopN            int    `json:"top_n,omitempty"`
+	MinSubmitters   int    `json:"min_submitters,omitempty"`
+	AutoApply       bool   `json:"auto_apply,omitempty"`
+	IntervalMinutes int    `json:"interval_minutes,omitempty"`
+}
+
+func (d dnsPodSettings) configured() bool {
+	return strings.TrimSpace(d.SecretID) != "" && strings.TrimSpace(d.SecretKey) != "" && strings.TrimSpace(d.Domain) != "" && strings.TrimSpace(d.SubDomain) != ""
+}
+
+func normalizeDNSPodSettings(cfg dnsPodSettings) dnsPodSettings {
+	cfg.SecretID = strings.TrimSpace(cfg.SecretID)
+	cfg.SecretKey = strings.TrimSpace(cfg.SecretKey)
+	cfg.Domain = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(cfg.Domain)), ".")
+	cfg.SubDomain = strings.TrimSuffix(strings.TrimSpace(cfg.SubDomain), ".")
+	if cfg.SubDomain == "" {
+		cfg.SubDomain = "@"
+	}
+	if cfg.TTL < 60 || cfg.TTL > 86400 {
+		cfg.TTL = 600
+	}
+	if cfg.TopN < 1 || cfg.TopN > 5 {
+		cfg.TopN = 3
+	}
+	if cfg.MinSubmitters < 1 || cfg.MinSubmitters > 1000 {
+		cfg.MinSubmitters = 2
+	}
+	if cfg.IntervalMinutes < 5 || cfg.IntervalMinutes > 1440 {
+		cfg.IntervalMinutes = 30
+	}
+	return cfg
+}
+
 type persistedConfig struct {
-	Host       string             `json:"host"`
-	Port       int                `json:"port"`
-	DataDir    string             `json:"data_dir"`
-	Mode       string             `json:"mode"`
-	Firewall   bool               `json:"firewall"`
-	Auth       authSettings       `json:"auth,omitempty"`
-	Cloudflare cloudflareSettings `json:"cloudflare"`
+	Host          string             `json:"host"`
+	Port          int                `json:"port"`
+	PublicEnabled bool               `json:"public_enabled"`
+	PublicPort    int                `json:"public_port"`
+	DataDir       string             `json:"data_dir"`
+	Mode          string             `json:"mode"`
+	Firewall      bool               `json:"firewall"`
+	Auth          authSettings       `json:"auth,omitempty"`
+	Cloudflare    cloudflareSettings `json:"cloudflare"`
+	DNSPod        dnsPodSettings     `json:"dnspod,omitempty"`
 }
 
 func defaultPersistedConfig() persistedConfig {
@@ -48,11 +91,13 @@ func defaultPersistedConfig() persistedConfig {
 		mode = "single"
 	}
 	return persistedConfig{
-		Host:     defaultListenHost,
-		Port:     defaultListenPort,
-		DataDir:  defaultDataDir(),
-		Mode:     mode,
-		Firewall: true,
+		Host:          defaultListenHost,
+		Port:          defaultListenPort,
+		PublicEnabled: true,
+		PublicPort:    defaultPublicPort,
+		DataDir:       defaultDataDir(),
+		Mode:          mode,
+		Firewall:      true,
 	}
 }
 
@@ -96,6 +141,15 @@ func loadPersistedConfig(path string) (persistedConfig, error) {
 	if cfg.Port < 1 || cfg.Port > 65535 {
 		cfg.Port = defaultListenPort
 	}
+	if cfg.PublicPort < 1 || cfg.PublicPort > 65535 {
+		cfg.PublicPort = defaultPublicPort
+	}
+	if cfg.PublicPort == cfg.Port {
+		cfg.PublicPort = cfg.Port + 2
+		if cfg.PublicPort > 65535 {
+			cfg.PublicPort = defaultPublicPort
+		}
+	}
 	if strings.TrimSpace(cfg.DataDir) == "" {
 		cfg.DataDir = defaultDataDir()
 	}
@@ -110,6 +164,7 @@ func loadPersistedConfig(path string) (persistedConfig, error) {
 		cfg.Mode = "single"
 	}
 	cfg.Cloudflare.Domains = normalizeDomainList(cfg.Cloudflare.Domains)
+	cfg.DNSPod = normalizeDNSPodSettings(cfg.DNSPod)
 	return cfg, nil
 }
 
@@ -163,6 +218,18 @@ func (s *settingsStore) updateCloudflare(value cloudflareSettings) error {
 	defer s.mu.Unlock()
 	next := s.cfg
 	next.Cloudflare = value
+	if err := savePersistedConfig(s.path, next); err != nil {
+		return err
+	}
+	s.cfg = next
+	return nil
+}
+
+func (s *settingsStore) updateDNSPod(value dnsPodSettings) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := s.cfg
+	next.DNSPod = normalizeDNSPodSettings(value)
 	if err := savePersistedConfig(s.path, next); err != nil {
 		return err
 	}
@@ -234,6 +301,21 @@ func promptYesNo(reader *bufio.Reader, label string, fallback bool) (bool, error
 	}
 }
 
+func autoListenHost() (bindHost, publicIP string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+	info := queryPublicIPv4(ctx)
+	publicIP = strings.TrimSpace(info.IP)
+	if ip := net.ParseIP(publicIP); ip != nil && ip.To4() != nil {
+		listener, err := net.Listen("tcp", net.JoinHostPort(publicIP, "0"))
+		if err == nil {
+			_ = listener.Close()
+			return publicIP, publicIP
+		}
+	}
+	return defaultListenHost, publicIP
+}
+
 func runSetupWizard() error {
 	reader := bufio.NewReader(os.Stdin)
 	configPath := defaultConfigPath()
@@ -247,17 +329,31 @@ func runSetupWizard() error {
 	fmt.Printf(" Active IP Sniffer %s · Go 轻量配置界面\n", appVersion)
 	fmt.Println("============================================================")
 	fmt.Printf("配置文件: %s\n", configPath)
-	fmt.Println("直接按 Enter 保留当前值。")
+	fmt.Println("除监听 IP 外，直接按 Enter 保留当前值。监听 IP 直接回车会自动检测公网 IPv4。")
 	fmt.Println()
 
-	host, err := promptLine(reader, "WebUI 监听地址", cfg.Host)
-	if err != nil {
+	fmt.Printf("WebUI 监听 IP（直接回车=自动公网 IPv4；当前 %s）: ", cfg.Host)
+	hostLine, err := reader.ReadString('\n')
+	if err != nil && len(hostLine) == 0 {
 		return err
 	}
-	if net.ParseIP(host) == nil && host != "localhost" {
-		return fmt.Errorf("无效监听地址: %s", host)
+	hostLine = strings.TrimSpace(hostLine)
+	if hostLine == "" {
+		bindHost, publicIP := autoListenHost()
+		cfg.Host = bindHost
+		if publicIP == "" {
+			fmt.Printf("未能检测公网 IPv4，使用 %s 监听。\n", bindHost)
+		} else if bindHost == publicIP {
+			fmt.Printf("已检测并使用可绑定公网 IPv4: %s\n", publicIP)
+		} else {
+			fmt.Printf("检测到公网 IPv4 %s，但它不是本机可直接绑定地址（NAT/映射场景），自动使用 %s 监听；公网访问仍使用 %s。\n", publicIP, bindHost, publicIP)
+		}
+	} else {
+		if net.ParseIP(hostLine) == nil && hostLine != "localhost" {
+			return fmt.Errorf("无效监听地址: %s", hostLine)
+		}
+		cfg.Host = hostLine
 	}
-	cfg.Host = host
 
 	portText, err := promptLine(reader, "WebUI 启动端口", strconv.Itoa(cfg.Port))
 	if err != nil {
@@ -268,6 +364,25 @@ func runSetupWizard() error {
 		return fmt.Errorf("无效端口: %s", portText)
 	}
 	cfg.Port = port
+
+	cfg.PublicEnabled, err = promptYesNo(reader, "是否启用独立用户测速页", cfg.PublicEnabled)
+	if err != nil {
+		return err
+	}
+	if cfg.PublicEnabled {
+		publicPortText, err := promptLine(reader, "用户测速页端口", strconv.Itoa(cfg.PublicPort))
+		if err != nil {
+			return err
+		}
+		publicPort, err := strconv.Atoi(publicPortText)
+		if err != nil || publicPort < 1 || publicPort > 65535 {
+			return fmt.Errorf("无效用户测速页端口: %s", publicPortText)
+		}
+		if publicPort == cfg.Port {
+			return errors.New("用户测速页端口不能与总控 WebUI 端口相同")
+		}
+		cfg.PublicPort = publicPort
+	}
 
 	if cfg.Auth.configured() {
 		changePassword, err := promptYesNo(reader, "是否修改已经配置的 WebUI 管理密码", false)
@@ -373,7 +488,7 @@ func runSetupWizard() error {
 			return fmt.Errorf("无效运行模式: %s", mode)
 		}
 		if cfg.Mode == "daemon" {
-			cfg.Firewall, err = promptYesNo(reader, "是否自动放行 WebUI TCP 端口", cfg.Firewall)
+			cfg.Firewall, err = promptYesNo(reader, "是否自动放行总控与用户测速页 TCP 端口", cfg.Firewall)
 			if err != nil {
 				return err
 			}
@@ -383,6 +498,11 @@ func runSetupWizard() error {
 	fmt.Println()
 	fmt.Println("---------------------- 配置摘要 ---------------------------")
 	fmt.Printf("监听:       %s:%d\n", cfg.Host, cfg.Port)
+	if cfg.PublicEnabled {
+		fmt.Printf("用户测速页: %s:%d\n", cfg.Host, cfg.PublicPort)
+	} else {
+		fmt.Println("用户测速页: 已关闭")
+	}
 	fmt.Printf("运行模式:   %s\n", cfg.Mode)
 	fmt.Printf("数据目录:   %s\n", cfg.DataDir)
 	fmt.Printf("WebUI认证:  %s（用户名 admin）\n", map[bool]string{true: "已配置", false: "未配置"}[cfg.Auth.configured()])
@@ -418,6 +538,9 @@ func runSetupWizard() error {
 		}
 		if cfg.Firewall {
 			_ = openFirewallPort(cfg.Port)
+			if cfg.PublicEnabled {
+				_ = openFirewallPort(cfg.PublicPort)
+			}
 		}
 		fmt.Printf("常驻服务已启动: http://%s:%d\n", displayHost(cfg.Host), cfg.Port)
 		if manager == "openrc" {

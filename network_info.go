@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"io"
 	"net"
 	"net/http"
@@ -42,7 +43,7 @@ func currentEgressInfo(ctx context.Context) egressInfo {
 		return egressCache.value
 	}
 
-	value := queryCloudflareTrace(ctx)
+	value := queryCloudflareTrace(ctx, egressConfig{Mode: "direct"})
 	if value.IP == "" {
 		value = queryPublicIPv4(ctx)
 	}
@@ -54,7 +55,7 @@ func currentEgressInfo(ctx context.Context) egressInfo {
 	return value
 }
 
-func queryCloudflareTrace(ctx context.Context) egressInfo {
+func queryCloudflareTrace(ctx context.Context, egress egressConfig) egressInfo {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://www.cloudflare.com/cdn-cgi/trace", nil)
@@ -62,7 +63,18 @@ func queryCloudflareTrace(ctx context.Context) egressInfo {
 		return egressInfo{}
 	}
 	req.Header.Set("User-Agent", "Active-IP-Sniffer/"+appVersion)
-	resp, err := http.DefaultClient.Do(req)
+	transport := &http.Transport{
+		Proxy:                 nil,
+		ForceAttemptHTTP2:     false,
+		DisableCompression:    true,
+		TLSHandshakeTimeout:   5 * time.Second,
+		ResponseHeaderTimeout: 5 * time.Second,
+		DialContext: func(dialCtx context.Context, network, address string) (net.Conn, error) {
+			return egress.dialContext(dialCtx, network, address, 5*time.Second)
+		},
+	}
+	defer transport.CloseIdleConnections()
+	resp, err := (&http.Client{Transport: transport, Timeout: 6 * time.Second}).Do(req)
 	if err != nil {
 		return egressInfo{}
 	}
@@ -88,6 +100,35 @@ func queryCloudflareTrace(ctx context.Context) egressInfo {
 		}
 	}
 	return info
+}
+
+func handleEgressCheck(role string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 8_000)
+		defer r.Body.Close()
+		var request egressConfig
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&request); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request: " + err.Error()})
+			return
+		}
+		egress, err := normalizeEgress(request.Mode, request.WARPProxy)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		info := queryCloudflareTrace(r.Context(), egress)
+		if info.IP == "" {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "cannot reach Cloudflare trace through selected egress"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"role": role, "mode": egress.Mode, "proxy": egress.WARPProxy, "egress": info})
+	}
 }
 
 func queryPublicIPv4(ctx context.Context) egressInfo {
