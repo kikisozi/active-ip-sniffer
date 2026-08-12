@@ -1,0 +1,58 @@
+name: Apply and verify v3.4.1 patch
+
+on:
+  push:
+    branches:
+      - fix-probe-warp-auto-341
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-test:
+    if: "!contains(github.event.head_commit.message || '', 'feat: fix local probe and add auto WARP 40099')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+
+      - name: Apply source patch
+        run: python3 .patch-v341.py
+
+      - name: Format and validate
+        shell: bash
+        run: |
+          set -euo pipefail
+          gofmt -w *.go
+          python3 - <<'PY'
+          from pathlib import Path
+          for src,name in [('ui.go','admin'),('public_web.go','public')]:
+              s=Path(src).read_text()
+              a=s.index('<script>')+len('<script>')
+              b=s.index('</script>',a)
+              Path('/tmp/'+name+'-ui.js').write_text(s[a:b])
+          PY
+          node --check /tmp/admin-ui.js
+          node --check /tmp/public-ui.js
+          sh -n warp-helper.sh
+          pwsh -NoProfile -Command "[void][scriptblock]::Create((Get-Content -Raw './warp-helper.ps1'))"
+          go test ./...
+          go test -race ./...
+          go vet ./...
+
+      - name: Commit verified patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .patch-v341.py .github/workflows/apply-v341.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "feat: fix local probe and add auto WARP 40099"
+          git push origin HEAD:fix-probe-warp-auto-341
