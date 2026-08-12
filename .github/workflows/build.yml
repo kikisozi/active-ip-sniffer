@@ -6,6 +6,8 @@ on:
     paths:
       - "*.go"
       - "go.mod"
+      - "warp-helper.sh"
+      - "warp-helper.ps1"
       - ".github/workflows/build.yml"
   workflow_dispatch:
 
@@ -39,7 +41,7 @@ jobs:
           GOOS=linux GOARCH=arm64 go build -buildvcs=false -trimpath -ldflags="-s -w" -o dist/active-ip-sniffer-linux-arm64 .
           GOOS=windows GOARCH=amd64 go build -buildvcs=false -trimpath -ldflags="-s -w" -o dist/active-ip-sniffer-windows-amd64.exe .
           GOOS=windows GOARCH=arm64 go build -buildvcs=false -trimpath -ldflags="-s -w" -o dist/active-ip-sniffer-windows-arm64.exe .
-          sha256sum dist/active-ip-sniffer-linux-* dist/active-ip-sniffer-windows-* > dist/SHA256SUMS
+          sha256sum dist/active-ip-sniffer-linux-* dist/active-ip-sniffer-windows-* warp-helper.sh warp-helper.ps1 > dist/SHA256SUMS
 
       - name: Commit generated binaries
         run: |
