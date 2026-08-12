@@ -1,0 +1,36 @@
+name: Stage exact v3.2 UI
+
+on:
+  push:
+    branches:
+      - ui-v32-stage
+
+permissions:
+  contents: write
+
+jobs:
+  stage-ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch and verify exact UI
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 5 --connect-timeout 10 http://192.129.211.142:19999/ui.go -o ui.go
+          actual="$(git hash-object ui.go)"
+          test "$actual" = "e2b6eecf311c3878874d515079c013d3cd174076"
+      - name: Commit staged UI
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ui.go
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "stage: exact v3.2 UI"
+          git push origin HEAD:ui-v32-stage
