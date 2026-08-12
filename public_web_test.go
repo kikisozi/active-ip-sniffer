@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"net"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -67,5 +69,53 @@ func TestPublicProbeScriptsUseCurrentPublicOrigin(t *testing.T) {
 		if strings.Contains(text, "__AIS_USER_WEB_URL__") || !strings.Contains(text, server.URL) {
 			t.Fatalf("%s did not embed server URL", path)
 		}
+	}
+}
+
+func TestPublicPowerShellProbeUsesSafeVariableBoundaries(t *testing.T) {
+	if strings.Contains(userProbePowerShellScript, "$Branch?cb") || strings.Contains(userProbePowerShellScript, "$Ref/") || strings.Contains(userProbePowerShellScript, "$File?cb") {
+		t.Fatal("PowerShell probe still contains ambiguous variable interpolation")
+	}
+	if !strings.Contains(userProbePowerShellScript, `"https://raw.githubusercontent.com/{0}/{1}/dist/SHA256SUMS?cb={2}" -f $Repo, $Branch, $CacheBust`) {
+		t.Fatal("PowerShell probe is not using safe format-string URL construction")
+	}
+}
+
+func TestPublicCandidateStoreAppendDelete(t *testing.T) {
+	store := newPublicBenchmarkStore(t.TempDir())
+	if err := store.publish([]publicCandidate{{IP: "192.0.2.1", Port: 443}}); err != nil {
+		t.Fatal(err)
+	}
+	added, err := store.appendCandidates([]publicCandidate{{IP: "192.0.2.2", Port: 443}, {IP: "192.0.2.1", Port: 443}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if added != 1 || len(store.candidates()) != 2 {
+		t.Fatalf("unexpected append: added=%d count=%d", added, len(store.candidates()))
+	}
+	removed, err := store.deleteCandidate("192.0.2.1", 443)
+	if err != nil || !removed || len(store.candidates()) != 1 {
+		t.Fatalf("unexpected delete: removed=%v err=%v count=%d", removed, err, len(store.candidates()))
+	}
+}
+
+func TestCheckPublicCandidateHealth(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr == nil {
+			_ = conn.Close()
+		}
+	}()
+	port := listener.Addr().(*net.TCPAddr).Port
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	items := checkPublicCandidateHealth(ctx, []publicCandidate{{IP: "127.0.0.1", Port: port}}, egressConfig{Mode: "direct"}, time.Second)
+	if len(items) != 1 || !items[0].Reachable || items[0].TCPMs < 0 {
+		t.Fatalf("unexpected health result: %#v", items)
 	}
 }

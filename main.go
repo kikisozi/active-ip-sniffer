@@ -24,7 +24,7 @@ import (
 )
 
 const (
-	appVersion        = "3.5.1"
+	appVersion        = "3.5.2"
 	maxPorts          = 32
 	maxAttempts       = uint64(2_000_000)
 	maxWorkers        = 512
@@ -753,6 +753,8 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("/api/ip/meta", handleIPMetadata)
 	mux.HandleFunc("/api/candidates/import", handleCandidateCSVImport)
 	mux.HandleFunc("/api/public/publish", a.handlePublicPublish)
+	mux.HandleFunc("/api/public/candidates", a.handlePublicCandidatesAdmin)
+	mux.HandleFunc("/api/public/candidates/check", a.handlePublicCandidateCheck)
 	mux.HandleFunc("/api/public/submissions", a.handlePublicSubmissions)
 	mux.HandleFunc("/api/public/smart-plan", a.handleSmartDNSPlan)
 	mux.HandleFunc("/api/dnspod/config", a.handleDNSPodConfig)
@@ -919,7 +921,7 @@ const legacyIndexHTML = `<!doctype html>
     <div class="field s6"><label>VLESS TLS+WS 连接</label><input id="benchURI" type="password" autocomplete="off" placeholder="vless://UUID@IP:443?...&security=tls&type=ws&host=...&path=..."><div style="height:10px"></div><div class="notice">候选 IP 只替换连接地址；UUID、端口、SNI、Host、Path 全部沿用 VLESS 链接。测试依次验证 TCP → TLS/WS 101 → VLESS 实际出站 → speed.cloudflare.com 下载。测速串行执行，避免多个候选同时抢带宽。VLESS 链接仅保存在本次任务内存中，不写 CSV、不写日志。</div></div>
     <div class="field s3"><label>每个 IP 下载（MB）</label><input id="benchMB" type="number" min="1" max="100" value="30"></div>
     <div class="field s3"><label>阶段超时（秒）</label><input id="benchTimeout" type="number" min="2" max="20" step="1" value="12"></div>
-    <div class="s6 actions"><span class="muted">最多 128 个候选；TCP 启动取 3 次中位数。</span><div class="row"><button id="benchCancel" class="btn danger" disabled>停止测试</button><button id="benchStart" class="btn primary">开始测试</button></div></div>
+    <div class="s6 actions"><span class="muted">候选数量不再限制为 128；TCP 启动取 3 次中位数。</span><div class="row"><button id="benchCancel" class="btn danger" disabled>停止测试</button><button id="benchStart" class="btn primary">开始测试</button></div></div>
   </div></section>
   <section id="benchProgressCard" class="card hidden"><h2>VLESS 测试进度</h2><div class="body"><div class="metric"><strong id="benchPassed">通过 0 个 IP</strong><div class="track"><div id="benchFill" class="fill"></div></div><span id="benchPct">0%</span></div><div id="benchStatus" class="muted" style="margin-top:10px">等待测试</div></div></section>
   <section id="benchResultCard" class="card hidden"><h2>VLESS 测试结果</h2><div class="body actions"><span id="benchMeta" class="muted"></span><button id="benchExport" class="btn secondary" disabled>导出测速 CSV</button></div><div class="table-wrap"><table><thead><tr><th>#</th><th>IP</th><th>TCP</th><th>TCP 中位</th><th>TLS/WS</th><th>VLESS 启动</th><th>前 1s</th><th>前 3s</th><th>稳定</th><th>峰值</th><th>结果</th></tr></thead><tbody id="benchRows"></tbody></table></div></section>

@@ -25,7 +25,6 @@ import (
 )
 
 const (
-	vlessBenchMaxCandidates   = 128
 	vlessBenchTCPAttempts     = 3
 	vlessBenchDefaultMB       = 30
 	vlessBenchMaxMB           = 100
@@ -243,9 +242,6 @@ func normalizeBenchCandidates(values []string) ([]string, error) {
 	}
 	if len(result) == 0 {
 		return nil, errors.New("provide at least one IPv4 candidate")
-	}
-	if len(result) > vlessBenchMaxCandidates {
-		return nil, fmt.Errorf("provide at most %d VLESS candidates", vlessBenchMaxCandidates)
 	}
 	return result, nil
 }
@@ -765,7 +761,9 @@ func handleVLESSBenchStart(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 200_000)
+	// VLESS candidate count has no explicit per-job cap. Keep only a generous
+	// request-size guard so malformed clients cannot stream an unbounded body.
+	r.Body = http.MaxBytesReader(w, r.Body, 32<<20)
 	defer r.Body.Close()
 	var request vlessBenchRequest
 	decoder := json.NewDecoder(r.Body)

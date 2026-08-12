@@ -49,6 +49,15 @@ type publicCandidate struct {
 	Meta ipMetadata `json:"meta,omitempty"`
 }
 
+type publicCandidateHealth struct {
+	IP        string     `json:"ip"`
+	Port      int        `json:"port"`
+	Meta      ipMetadata `json:"meta,omitempty"`
+	Reachable bool       `json:"reachable"`
+	TCPMs     float64    `json:"tcp_ms,omitempty"`
+	Error     string     `json:"error,omitempty"`
+}
+
 type publicSubmission struct {
 	ID          string          `json:"id"`
 	SubmittedAt time.Time       `json:"submitted_at"`
@@ -117,25 +126,74 @@ func (s *publicBenchmarkStore) persistLocked() error {
 	return os.Rename(tmp, s.path)
 }
 
-func (s *publicBenchmarkStore) publish(items []publicCandidate) error {
+func publicCandidateKey(ip string, port int) string {
+	return net.JoinHostPort(strings.TrimSpace(ip), strconv.Itoa(port))
+}
+
+func normalizePublicCandidate(item publicCandidate) (publicCandidate, bool) {
+	ip := net.ParseIP(strings.TrimSpace(item.IP))
+	if ip == nil || ip.To4() == nil {
+		return publicCandidate{}, false
+	}
+	if !validCFHTTPSPort(item.Port) {
+		item.Port = 443
+	}
+	item.IP = ip.To4().String()
+	item.Meta = normalizeMetadata(item.Meta)
+	item.Meta.IP = item.IP
+	return item, true
+}
+
+func parsePublicCandidateTargets(targets []string) ([]publicCandidate, error) {
+	items := make([]publicCandidate, 0, len(targets))
 	seen := make(map[string]struct{})
-	clean := make([]publicCandidate, 0, len(items))
-	for _, item := range items {
-		ip := net.ParseIP(strings.TrimSpace(item.IP))
+	for _, raw := range targets {
+		host, port, err := splitEndpointPort(raw, 443)
+		if err != nil {
+			return nil, err
+		}
+		ip := net.ParseIP(strings.TrimSpace(host))
 		if ip == nil || ip.To4() == nil {
-			continue
+			return nil, fmt.Errorf("invalid public benchmark IPv4: %s", raw)
 		}
-		if !validCFHTTPSPort(item.Port) {
-			item.Port = 443
-		}
-		item.IP = ip.To4().String()
-		key := fmt.Sprintf("%s:%d", item.IP, item.Port)
+		item, _ := normalizePublicCandidate(publicCandidate{IP: ip.To4().String(), Port: port})
+		key := publicCandidateKey(item.IP, item.Port)
 		if _, ok := seen[key]; ok {
 			continue
 		}
 		seen[key] = struct{}{}
-		if item.Meta.IP == "" {
-			item.Meta.IP = item.IP
+		items = append(items, item)
+		if len(items) > publicCandidateLimit {
+			return nil, fmt.Errorf("public benchmark candidates exceed %d", publicCandidateLimit)
+		}
+	}
+	if len(items) == 0 {
+		return nil, errors.New("provide at least one public benchmark IPv4")
+	}
+	return items, nil
+}
+
+func (s *publicBenchmarkStore) publish(items []publicCandidate) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	existing := make(map[string]publicCandidate, len(s.state.Candidates))
+	for _, item := range s.state.Candidates {
+		existing[publicCandidateKey(item.IP, item.Port)] = item
+	}
+	seen := make(map[string]struct{})
+	clean := make([]publicCandidate, 0, len(items))
+	for _, raw := range items {
+		item, ok := normalizePublicCandidate(raw)
+		if !ok {
+			continue
+		}
+		key := publicCandidateKey(item.IP, item.Port)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		if old, ok := existing[key]; ok && !metadataMeaningful(item.Meta) && metadataMeaningful(old.Meta) {
+			item.Meta = old.Meta
 		}
 		clean = append(clean, item)
 		if len(clean) >= publicCandidateLimit {
@@ -145,10 +203,89 @@ func (s *publicBenchmarkStore) publish(items []publicCandidate) error {
 	if len(clean) == 0 {
 		return errors.New("no valid public benchmark candidates")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.state.Candidates = clean
 	return s.persistLocked()
+}
+
+func (s *publicBenchmarkStore) appendCandidates(items []publicCandidate) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	clean := append([]publicCandidate(nil), s.state.Candidates...)
+	index := make(map[string]int, len(clean))
+	for i, item := range clean {
+		index[publicCandidateKey(item.IP, item.Port)] = i
+	}
+	added := 0
+	for _, raw := range items {
+		item, ok := normalizePublicCandidate(raw)
+		if !ok {
+			continue
+		}
+		key := publicCandidateKey(item.IP, item.Port)
+		if i, ok := index[key]; ok {
+			if metadataMeaningful(item.Meta) {
+				clean[i].Meta = item.Meta
+			}
+			continue
+		}
+		if len(clean) >= publicCandidateLimit {
+			return added, fmt.Errorf("public benchmark candidates exceed %d", publicCandidateLimit)
+		}
+		index[key] = len(clean)
+		clean = append(clean, item)
+		added++
+	}
+	if added == 0 {
+		return 0, nil
+	}
+	s.state.Candidates = clean
+	return added, s.persistLocked()
+}
+
+func (s *publicBenchmarkStore) deleteCandidate(ip string, port int) (bool, error) {
+	item, ok := normalizePublicCandidate(publicCandidate{IP: ip, Port: port})
+	if !ok {
+		return false, errors.New("invalid public benchmark candidate")
+	}
+	key := publicCandidateKey(item.IP, item.Port)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	clean := make([]publicCandidate, 0, len(s.state.Candidates))
+	removed := false
+	for _, current := range s.state.Candidates {
+		if publicCandidateKey(current.IP, current.Port) == key {
+			removed = true
+			continue
+		}
+		clean = append(clean, current)
+	}
+	if !removed {
+		return false, nil
+	}
+	s.state.Candidates = clean
+	return true, s.persistLocked()
+}
+
+func (s *publicBenchmarkStore) removeCandidateKeys(keys map[string]struct{}) (int, error) {
+	if len(keys) == 0 {
+		return 0, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	clean := make([]publicCandidate, 0, len(s.state.Candidates))
+	removed := 0
+	for _, item := range s.state.Candidates {
+		if _, ok := keys[publicCandidateKey(item.IP, item.Port)]; ok {
+			removed++
+			continue
+		}
+		clean = append(clean, item)
+	}
+	if removed == 0 {
+		return 0, nil
+	}
+	s.state.Candidates = clean
+	return removed, s.persistLocked()
 }
 
 func (s *publicBenchmarkStore) candidates() []publicCandidate {
@@ -166,6 +303,52 @@ func (s *publicBenchmarkStore) submissions() []publicSubmission {
 	}
 	sort.SliceStable(result, func(i, j int) bool { return result[i].SubmittedAt.After(result[j].SubmittedAt) })
 	return result
+}
+
+func checkPublicCandidateHealth(ctx context.Context, candidates []publicCandidate, egress egressConfig, timeout time.Duration) []publicCandidateHealth {
+	results := make([]publicCandidateHealth, len(candidates))
+	workers := 8
+	if len(candidates) < workers {
+		workers = len(candidates)
+	}
+	if workers < 1 {
+		return results
+	}
+	tasks := make(chan int)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			for idx := range tasks {
+				candidate := candidates[idx]
+				result := publicCandidateHealth{IP: candidate.IP, Port: candidate.Port, Meta: candidate.Meta}
+				started := time.Now()
+				conn, err := egress.dialContext(ctx, "tcp", net.JoinHostPort(candidate.IP, strconv.Itoa(candidate.Port)), timeout)
+				if err != nil {
+					result.Error = err.Error()
+					results[idx] = result
+					continue
+				}
+				result.Reachable = true
+				result.TCPMs = roundFloat(float64(time.Since(started).Microseconds())/1000, 1)
+				_ = conn.Close()
+				results[idx] = result
+			}
+		}()
+	}
+	for idx := range candidates {
+		select {
+		case <-ctx.Done():
+			close(tasks)
+			wg.Wait()
+			return results
+		case tasks <- idx:
+		}
+	}
+	close(tasks)
+	wg.Wait()
+	return results
 }
 
 func classifyCarrier(meta ipMetadata) string {
@@ -330,6 +513,134 @@ func (a *app) handlePublicPublish(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "count": len(a.public.candidates())})
 }
 
+func (a *app) handlePublicCandidatesAdmin(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, map[string]any{"items": a.public.candidates(), "limit": publicCandidateLimit})
+	case http.MethodPost:
+		r.Body = http.MaxBytesReader(w, r.Body, 128_000)
+		defer r.Body.Close()
+		var request struct {
+			Targets []string `json:"targets"`
+			Mode    string   `json:"mode"`
+		}
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&request); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request: " + err.Error()})
+			return
+		}
+		items, err := parsePublicCandidateTargets(request.Targets)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		mode := strings.ToLower(strings.TrimSpace(request.Mode))
+		if mode == "" {
+			mode = "append"
+		}
+		switch mode {
+		case "append":
+			added, err := a.public.appendCandidates(items)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "added": added, "count": len(a.public.candidates()), "items": a.public.candidates()})
+		case "replace":
+			if err := a.public.publish(items); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "count": len(a.public.candidates()), "items": a.public.candidates()})
+		default:
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "mode must be append or replace"})
+		}
+	case http.MethodDelete:
+		r.Body = http.MaxBytesReader(w, r.Body, 32_000)
+		defer r.Body.Close()
+		var request struct {
+			IP   string `json:"ip"`
+			Port int    `json:"port"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request: " + err.Error()})
+			return
+		}
+		removed, err := a.public.deleteCandidate(request.IP, request.Port)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed, "count": len(a.public.candidates()), "items": a.public.candidates()})
+	default:
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+	}
+}
+
+func (a *app) handlePublicCandidateCheck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 32_000)
+	defer r.Body.Close()
+	var request struct {
+		Prune      bool    `json:"prune"`
+		Timeout    float64 `json:"timeout"`
+		EgressMode string  `json:"egress_mode"`
+		WARPProxy  string  `json:"warp_proxy"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request: " + err.Error()})
+		return
+	}
+	candidates := a.public.candidates()
+	if len(candidates) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "items": []publicCandidateHealth{}, "removed": 0, "count": 0})
+		return
+	}
+	requested, err := normalizeEgress(request.EgressMode, request.WARPProxy)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	selected, info, err := resolveScanEgress(ctx, requested)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	timeout := time.Duration(clampFloat(request.Timeout, 0.2, 5, 1.5) * float64(time.Second))
+	health := checkPublicCandidateHealth(ctx, candidates, selected, timeout)
+	removed := 0
+	if request.Prune {
+		unreachable := make(map[string]struct{})
+		for _, item := range health {
+			if !item.Reachable {
+				unreachable[publicCandidateKey(item.IP, item.Port)] = struct{}{}
+			}
+		}
+		removed, err = a.public.removeCandidateKeys(unreachable)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":                    true,
+		"items":                 health,
+		"removed":               removed,
+		"count":                 len(a.public.candidates()),
+		"requested_egress_mode": requested.Mode,
+		"egress_mode":           selected.Mode,
+		"egress":                info,
+	})
+}
+
 func (a *app) handlePublicSubmissions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -467,7 +778,8 @@ body{margin:0;background:#f4f6f9;color:#18202b;font:14px/1.55 system-ui,"Segoe U
 const $=s=>document.querySelector(s);let probe='',token='',candidates=[],job='',probeEgress={},probeVersion='';
 function maskIP(ip){const p=String(ip||'').split('.');if(p.length===4)return p[0]+'.'+p[1]+'.*.*';const h=String(ip||'').split(':');return h.slice(0,2).join(':')+':****'}
 function setCommands(){const o=location.origin;$('#cmdWin').textContent='irm '+o+'/probe.ps1 | iex';$('#cmdUnix').textContent='curl -fsSL '+o+'/probe.sh | sh';$('#cmdAndroid').textContent='pkg install curl -y && curl -fsSL '+o+'/probe.sh | sh'}
-async function copyCode(id,button){try{await navigator.clipboard.writeText($('#'+id).textContent);button.textContent='已复制';setTimeout(()=>button.textContent='复制',900)}catch(e){alert('复制失败，请手动复制命令')}}
+function legacyCopy(text){const area=document.createElement('textarea');area.value=text;area.setAttribute('readonly','');area.style.position='fixed';area.style.left='-9999px';area.style.top='0';document.body.appendChild(area);area.focus();area.select();area.setSelectionRange(0,area.value.length);let ok=false;try{ok=document.execCommand('copy')}catch(e){}area.remove();return ok}
+async function copyCode(id,button){const text=$('#'+id).textContent;let ok=false;try{if(navigator.clipboard&&window.isSecureContext){await navigator.clipboard.writeText(text);ok=true}}catch(e){}if(!ok)ok=legacyCopy(text);if(ok){button.textContent='已复制';setTimeout(()=>button.textContent='复制',900);return}window.prompt('浏览器禁止自动复制，请复制下面命令：',text)}
 document.addEventListener('click',e=>{const b=e.target.closest('[data-copy]');if(b)copyCode(b.dataset.copy,b)});
 function importLaunch(){const p=new URLSearchParams(location.hash.replace(/^#/,'')),port=p.get('probe_port'),t=p.get('probe_token');if(port&&t){sessionStorage.setItem('ais_user_probe_port',port);sessionStorage.setItem('ais_user_probe_token',t);history.replaceState(null,'',location.pathname+location.search)}const savedPort=port||sessionStorage.getItem('ais_user_probe_port'),savedToken=t||sessionStorage.getItem('ais_user_probe_token');if(savedPort&&savedToken){probe='http://127.0.0.1:'+savedPort;token=savedToken}}
 async function pfetch(path,init={}){const h=new Headers(init.headers||{});h.set('X-Probe-Token',token);return fetch(probe+path,{...init,headers:h})}

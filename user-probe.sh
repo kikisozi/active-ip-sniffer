@@ -40,11 +40,6 @@ sha256_file() {
   fi
 }
 
-CACHE_BUST="$(date +%s)-$$"
-REF="$(curl -fsSL --retry 3 --connect-timeout 10 "https://api.github.com/repos/${REPO}/commits/${BRANCH}?cb=${CACHE_BUST}" \
-  | sed -n 's/^[[:space:]]*"sha": "\([0-9a-f]\{40\}\)",*$/\1/p' | head -n 1)"
-[ "${#REF}" -eq 40 ] || { echo "无法获取 GitHub 当前版本。" >&2; exit 4; }
-
 FILE="dist/active-ip-user-probe-${OS}-${ARCH}"
 if [ "$OS" = "darwin" ]; then
   BASE_DIR="${HOME}/Library/Caches/ActiveIPUserProbe"
@@ -52,19 +47,43 @@ else
   BASE_DIR="${XDG_CACHE_HOME:-${HOME}/.cache}/active-ip-user-probe"
 fi
 mkdir -p "$BASE_DIR"
-BIN="${BASE_DIR}/active-ip-user-probe"
-TMP="${BIN}.new.$$"
 SUMS="${BASE_DIR}/SHA256SUMS.$$"
-trap 'rm -f "$TMP" "$SUMS"' EXIT INT TERM
+TMP=""
+trap 'rm -f "${TMP:-}" "$SUMS"' EXIT INT TERM
 
-echo "下载轻量用户探针 ${OS}/${ARCH}..."
-curl -fL --retry 3 --connect-timeout 10 "https://raw.githubusercontent.com/${REPO}/${REF}/${FILE}?cb=${CACHE_BUST}" -o "$TMP"
-curl -fsSL --retry 3 --connect-timeout 10 "https://raw.githubusercontent.com/${REPO}/${REF}/dist/SHA256SUMS?cb=${CACHE_BUST}" -o "$SUMS"
-EXPECTED="$(awk -v file="$FILE" '$2 == file {print $1}' "$SUMS")"
-ACTUAL="$(sha256_file "$TMP")"
-[ -n "$EXPECTED" ] && [ "$EXPECTED" = "$ACTUAL" ] || { echo "用户探针 SHA256 校验失败。" >&2; exit 5; }
-chmod 0755 "$TMP"
-mv -f "$TMP" "$BIN"
+attempt=1
+while [ "$attempt" -le 3 ]; do
+  CACHE_BUST="$(date +%s)-$$-${attempt}"
+  curl -fsSL --retry 3 --connect-timeout 10 "https://raw.githubusercontent.com/${REPO}/${BRANCH}/dist/SHA256SUMS?cb=${CACHE_BUST}" -o "$SUMS"
+  EXPECTED="$(awk -v file="$FILE" '$2 == file {print $1}' "$SUMS")"
+  case "$EXPECTED" in
+    ''|*[!0-9a-fA-F]*)
+      if [ "$attempt" -lt 3 ]; then attempt=$((attempt+1)); sleep 2; continue; fi
+      echo "无法获取用户探针 SHA256。" >&2
+      exit 4
+      ;;
+  esac
+  [ "${#EXPECTED}" -eq 64 ] || { echo "无效的用户探针 SHA256。" >&2; exit 4; }
+  BIN="${BASE_DIR}/active-ip-user-probe-${EXPECTED}"
+  if [ -f "$BIN" ] && [ "$(sha256_file "$BIN")" = "$EXPECTED" ]; then
+    break
+  fi
+  TMP="${BIN}.new.$$"
+  echo "下载轻量用户探针 ${OS}/${ARCH}..."
+  curl -fL --retry 3 --connect-timeout 10 "https://raw.githubusercontent.com/${REPO}/${BRANCH}/${FILE}?cb=${CACHE_BUST}" -o "$TMP"
+  ACTUAL="$(sha256_file "$TMP")"
+  if [ "$EXPECTED" = "$ACTUAL" ]; then
+    chmod 0755 "$TMP"
+    mv -f "$TMP" "$BIN"
+    TMP=""
+    break
+  fi
+  rm -f "$TMP"
+  TMP=""
+  if [ "$attempt" -ge 3 ]; then echo "用户探针 SHA256 校验失败。" >&2; exit 5; fi
+  attempt=$((attempt+1))
+  sleep 2
+done
 
 echo "用户探针已就绪。即将自动打开测速网页。"
 exec "$BIN" --web-url "$WEB_URL"

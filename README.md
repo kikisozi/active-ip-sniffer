@@ -1,5 +1,12 @@
 # Active IP Sniffer
 
+## v3.5.2：用户探针与候选管理修复
+
+- 修复 Windows PowerShell 用户探针脚本把查询参数误解析成 GitHub commit SHA 的问题。
+- 用户测速页在公网 HTTP 环境下增加兼容复制方案，不再只依赖 secure-context Clipboard API。
+- 总控新增“用户测速候选管理”：手工追加/覆盖/删除、TCP 连通性检测、一键剔除失效候选。
+- VLESS 候选不再限制为 128 个；接口只保留 32 MiB 请求体保护。CF Direct 当前仍保留 2,000,000 endpoint 的输入保护上限。
+
 ## v3.5.1：Cloudflare One Client 2026.6 兼容修复
 
 - WARP helper 对 `status/settings/connect/disconnect/mode/proxy/registration` 统一传入 `--accept-tos`，兼容 Cloudflare One Client 2026.6 对非交互式 CLI 的 ToS 检查。
@@ -35,7 +42,7 @@ TCP 扫描结果区提供“填入 VLESS 测试”按钮，会读取本次任务
 
 候选 IP **只替换 VLESS URI 的连接地址**；UUID、端口、SNI、Host、Path 都保持原值。因此一个 IP 只有在完整 VLESS 出站也成功后才会标记为“通过”，可以排除“443 可达但节点实际不能用”的误判。
 
-测速固定每个成功 IP 下载 30 MB，且候选 IP 串行测试，避免多个测速任务同时抢占 VPS 带宽而影响排名。30 MB 正文必须在 5 秒内完整完成，否则立即按 `download_timeout` 淘汰。最多一次提交 128 个候选 IP。
+测速固定每个成功 IP 下载 30 MB，且候选 IP 串行测试，避免多个测速任务同时抢占 VPS 带宽而影响排名。30 MB 正文必须在 5 秒内完整完成，否则立即按 `download_timeout` 淘汰。VLESS 候选数量不再设置 128 个的显式上限。
 
 VLESS URI 仅用于当前内存任务：不会写入扫描结果文件、不会出现在测速 CSV、程序也不会主动把 URI 写入日志。测速 CSV 只包含候选 IP、各阶段延迟、吞吐量和失败阶段。
 
@@ -177,7 +184,7 @@ v probe
 探针会输出：
 
 ```text
-Active IP Sniffer 3.5.1 local probe: http://127.0.0.1:18767
+Active IP Sniffer 3.5.2 local probe: http://127.0.0.1:18767
 Local probe token: <随机 Token>
 ```
 

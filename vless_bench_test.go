@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -30,6 +31,20 @@ func TestNormalizeBenchCandidates(t *testing.T) {
 	}
 	if len(values) != 2 || values[0] != "8.8.8.8" || values[1] != "1.1.1.1" {
 		t.Fatalf("unexpected values: %#v", values)
+	}
+}
+
+func TestNormalizeBenchCandidatesAllowsMoreThan128(t *testing.T) {
+	input := make([]string, 0, 300)
+	for i := 0; i < 300; i++ {
+		input = append(input, fmt.Sprintf("10.0.%d.%d", i/254, i%254+1))
+	}
+	values, err := normalizeBenchCandidates(input)
+	if err != nil {
+		t.Fatalf("normalizeBenchCandidates(300): %v", err)
+	}
+	if len(values) != 300 {
+		t.Fatalf("expected 300 candidates, got %d", len(values))
 	}
 }
 
