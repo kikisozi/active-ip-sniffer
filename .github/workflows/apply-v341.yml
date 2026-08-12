@@ -47,11 +47,12 @@ jobs:
           go test -race ./...
           go vet ./...
 
-      - name: Commit verified patch
+      - name: Commit verified ordinary files
         shell: bash
         run: |
           set -euo pipefail
-          rm -f .patch-v341.py .fix-patcher.py .github/workflows/apply-v341.yml
+          rm -f .patch-v341.py .fix-patcher.py
+          git checkout origin/main -- .github/workflows/build.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
