@@ -48,6 +48,8 @@ type vlessBenchRequest struct {
 	Candidates []string `json:"candidates"`
 	BytesMB    int      `json:"bytes_mb"`
 	Timeout    float64  `json:"timeout"`
+	EgressMode string   `json:"egress_mode,omitempty"`
+	WARPProxy  string   `json:"warp_proxy,omitempty"`
 }
 
 type vlessBenchResult struct {
@@ -247,7 +249,7 @@ func normalizeBenchCandidates(values []string) ([]string, error) {
 	return result, nil
 }
 
-func tcpMedian(ctx context.Context, ip string, port, attempts int, timeout time.Duration) (int, time.Duration) {
+func tcpMedian(ctx context.Context, ip string, port, attempts int, timeout time.Duration, egress egressConfig) (int, time.Duration) {
 	values := make([]time.Duration, 0, attempts)
 	for i := 0; i < attempts; i++ {
 		select {
@@ -256,8 +258,7 @@ func tcpMedian(ctx context.Context, ip string, port, attempts int, timeout time.
 		default:
 		}
 		started := time.Now()
-		dialer := net.Dialer{Timeout: timeout}
-		conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(ip, strconv.Itoa(port)))
+		conn, err := egress.dialContext(ctx, "tcp", net.JoinHostPort(ip, strconv.Itoa(port)), timeout)
 		if err != nil {
 			continue
 		}
@@ -439,10 +440,9 @@ func (w *websocketStreamConn) readFrameHeader() (byte, int64, bool, [4]byte, err
 	return opcode, int64(length), masked, mask, nil
 }
 
-func dialVLESSWebsocket(ctx context.Context, cfg vlessEndpointConfig, candidate string, timeout time.Duration) (*websocketStreamConn, time.Duration, error) {
+func dialVLESSWebsocket(ctx context.Context, cfg vlessEndpointConfig, candidate string, timeout time.Duration, egress egressConfig) (*websocketStreamConn, time.Duration, error) {
 	started := time.Now()
-	dialer := net.Dialer{Timeout: timeout}
-	raw, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(candidate, strconv.Itoa(cfg.Port)))
+	raw, err := egress.dialContext(ctx, "tcp", net.JoinHostPort(candidate, strconv.Itoa(cfg.Port)), timeout)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -553,8 +553,8 @@ func makeVLESSRequest(uuid [16]byte, targetHost string, targetPort int) ([]byte,
 	return request, nil
 }
 
-func dialVLESS(ctx context.Context, cfg vlessEndpointConfig, candidate, targetHost string, targetPort int, timeout time.Duration) (net.Conn, time.Duration, error) {
-	websocketConn, transportTime, err := dialVLESSWebsocket(ctx, cfg, candidate, timeout)
+func dialVLESS(ctx context.Context, cfg vlessEndpointConfig, candidate, targetHost string, targetPort int, timeout time.Duration, egress egressConfig) (net.Conn, time.Duration, error) {
+	websocketConn, transportTime, err := dialVLESSWebsocket(ctx, cfg, candidate, timeout, egress)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -572,14 +572,14 @@ func dialVLESS(ctx context.Context, cfg vlessEndpointConfig, candidate, targetHo
 	return &vlessStreamConn{Conn: websocketConn}, transportTime, nil
 }
 
-func runVLESSBenchCandidate(ctx context.Context, cfg vlessEndpointConfig, candidate string, bytesWanted int64, timeout time.Duration) vlessBenchResult {
+func runVLESSBenchCandidate(ctx context.Context, cfg vlessEndpointConfig, candidate string, bytesWanted int64, timeout time.Duration, egress egressConfig) vlessBenchResult {
 	result := vlessBenchResult{IP: candidate, TCPAttempts: vlessBenchTCPAttempts, Status: "failed"}
 	tcpTimeout := timeout
 	if tcpTimeout > 3*time.Second {
 		tcpTimeout = 3 * time.Second
 	}
 	result.TCPPassed, result.TCPMedianMS = 0, 0
-	passed, median := tcpMedian(ctx, candidate, cfg.Port, vlessBenchTCPAttempts, tcpTimeout)
+	passed, median := tcpMedian(ctx, candidate, cfg.Port, vlessBenchTCPAttempts, tcpTimeout, egress)
 	result.TCPPassed = passed
 	result.TCPMedianMS = durationMS(median)
 	if passed == 0 {
@@ -589,7 +589,7 @@ func runVLESSBenchCandidate(ctx context.Context, cfg vlessEndpointConfig, candid
 	}
 
 	startupStarted := time.Now()
-	conn, transportTime, err := dialVLESS(ctx, cfg, candidate, vlessBenchDefaultTarget, vlessBenchTargetPort, timeout)
+	conn, transportTime, err := dialVLESS(ctx, cfg, candidate, vlessBenchDefaultTarget, vlessBenchTargetPort, timeout, egress)
 	result.TransportMS = durationMS(transportTime)
 	result.TransportOK = transportTime > 0
 	if err != nil {
@@ -727,7 +727,7 @@ func roundFloat(value float64, digits int) float64 {
 	return math.Round(value*pow) / pow
 }
 
-func executeVLESSBench(job *vlessBenchJob, cfg vlessEndpointConfig, candidates []string, bytesWanted int64, timeout time.Duration) {
+func executeVLESSBench(job *vlessBenchJob, cfg vlessEndpointConfig, candidates []string, bytesWanted int64, timeout time.Duration, egress egressConfig) {
 	job.setState("running", "VLESS endpoint benchmark running sequentially")
 	for _, candidate := range candidates {
 		select {
@@ -736,7 +736,7 @@ func executeVLESSBench(job *vlessBenchJob, cfg vlessEndpointConfig, candidates [
 			return
 		default:
 		}
-		job.addResult(runVLESSBenchCandidate(job.ctx, cfg, candidate, bytesWanted, timeout))
+		job.addResult(runVLESSBenchCandidate(job.ctx, cfg, candidate, bytesWanted, timeout, egress))
 	}
 	if job.ctx.Err() != nil {
 		job.setState("cancelled", "VLESS endpoint benchmark cancelled")
@@ -779,17 +779,23 @@ func handleVLESSBenchStart(w http.ResponseWriter, r *http.Request) {
 	}
 	timeoutSeconds := clampFloat(request.Timeout, 2, 20, 12)
 	timeout := time.Duration(timeoutSeconds * float64(time.Second))
+	egress, err := normalizeEgress(request.EgressMode, request.WARPProxy)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
 	vlessBenchJobs.cleanupOld(time.Now())
 	ctx, cancel := context.WithCancel(context.Background())
 	id := newJobID()
 	job := &vlessBenchJob{id: id, startedAt: time.Now(), ctx: ctx, cancel: cancel, status: "queued", total: len(candidates)}
 	vlessBenchJobs.put(job)
-	go executeVLESSBench(job, cfg, candidates, int64(bytesMB)*1_000_000, timeout)
+	go executeVLESSBench(job, cfg, candidates, int64(bytesMB)*1_000_000, timeout, egress)
 	writeJSON(w, http.StatusAccepted, map[string]any{
-		"id":         id,
-		"candidates": len(candidates),
-		"bytes_mb":   bytesMB,
-		"target":     vlessBenchDefaultTarget,
+		"id":          id,
+		"candidates":  len(candidates),
+		"bytes_mb":    bytesMB,
+		"target":      vlessBenchDefaultTarget,
+		"egress_mode": egress.Mode,
 	})
 }
 

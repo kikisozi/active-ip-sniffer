@@ -90,15 +90,20 @@ type cfSpeedStartRequest struct {
 	Timeout      float64               `json:"timeout"`
 	Workers      int                   `json:"workers"`
 	QuickWorkers int                   `json:"quick_workers"`
+	PrecisionMB  int                   `json:"precision_mb,omitempty"`
+	EgressMode   string                `json:"egress_mode,omitempty"`
+	WARPProxy    string                `json:"warp_proxy,omitempty"`
 	Metadata     map[string]ipMetadata `json:"metadata,omitempty"`
 }
 
 type cfSpeedJob struct {
-	id        string
-	startedAt time.Time
-	ctx       context.Context
-	cancel    context.CancelFunc
-	total     uint64
+	id             string
+	startedAt      time.Time
+	ctx            context.Context
+	cancel         context.CancelFunc
+	total          uint64
+	egress         egressConfig
+	precisionBytes int64
 
 	prefilterDone atomic.Uint64
 	quickDone     atomic.Uint64
@@ -198,7 +203,7 @@ func (j *cfSpeedJob) snapshot() map[string]any {
 		"top20_passed":    passed,
 		"quick_bytes":     cfQuickBytes,
 		"quick_timeout_s": cfQuickTimeout.Seconds(),
-		"download_bytes":  cfSpeedBytes,
+		"download_bytes":  j.precisionBytes,
 		"results":         results,
 	}
 }
@@ -344,13 +349,12 @@ func prefilterCFSpeedEndpoints(job *cfSpeedJob, ranges []benchEndpointRange, tot
 	for i := 0; i < workers; i++ {
 		go func() {
 			defer wg.Done()
-			dialer := net.Dialer{Timeout: tcpTimeout}
 			for endpoint := range tasks {
 				if job.ctx.Err() != nil {
 					return
 				}
 				started := time.Now()
-				conn, dialErr := dialer.DialContext(job.ctx, "tcp", net.JoinHostPort(endpoint.IP, strconv.Itoa(endpoint.Port)))
+				conn, dialErr := job.egress.dialContext(job.ctx, "tcp", net.JoinHostPort(endpoint.IP, strconv.Itoa(endpoint.Port)), tcpTimeout)
 				job.prefilterDone.Add(1)
 				if dialErr != nil {
 					continue
@@ -435,7 +439,7 @@ func quickFilterCFSpeedEndpoints(job *cfSpeedJob, spoolPath string, inputCount, 
 					return
 				}
 				ctx, cancel := context.WithTimeout(job.ctx, cfQuickTimeout)
-				result := runDirectCFSpeed(ctx, endpoint, cfQuickBytes)
+				result := runDirectCFSpeed(ctx, endpoint, cfQuickBytes, job.egress)
 				cancel()
 				job.quickDone.Add(1)
 				if result.Status != "ok" {
@@ -505,15 +509,14 @@ type speedTraceTimes struct {
 	firstByte    time.Time
 }
 
-func runDirectCFSpeed(ctx context.Context, endpoint benchEndpoint, bytesWanted int64) cfSpeedResult {
+func runDirectCFSpeed(ctx context.Context, endpoint benchEndpoint, bytesWanted int64, egress egressConfig) cfSpeedResult {
 	result := cfSpeedResult{IP: endpoint.IP, Port: endpoint.Port, Status: "failed"}
 	requestStart := time.Now()
 	traceTimes := &speedTraceTimes{}
-	dialer := &net.Dialer{Timeout: 6 * time.Second, KeepAlive: 15 * time.Second}
 	transport := &http.Transport{
 		Proxy: nil,
 		DialContext: func(dialCtx context.Context, _, _ string) (net.Conn, error) {
-			return dialer.DialContext(dialCtx, "tcp", net.JoinHostPort(endpoint.IP, strconv.Itoa(endpoint.Port)))
+			return egress.dialContext(dialCtx, "tcp", net.JoinHostPort(endpoint.IP, strconv.Itoa(endpoint.Port)), 6*time.Second)
 		},
 		TLSClientConfig: &tls.Config{
 			ServerName: "speed.cloudflare.com",
@@ -676,7 +679,7 @@ func executeCFSpeedJob(job *cfSpeedJob, ranges []benchEndpointRange, total uint6
 		job.setState("complete", "complete", "No endpoint completed the 1 MB quick screen within 2 seconds")
 		return
 	}
-	job.setState("running", "download", fmt.Sprintf("%d endpoint(s) survived 1 MB / 2s screening; running one %.0f MB precision test each; ranking by peak speed", quickPassed, float64(cfSpeedBytes)/1_000_000))
+	job.setState("running", "download", fmt.Sprintf("%d endpoint(s) survived 1 MB / 2s screening; running one %.0f MB precision test each; ranking by peak speed", quickPassed, float64(job.precisionBytes)/1_000_000))
 	spool, err := os.Open(quickPath)
 	if err != nil {
 		job.setState("failed", "failed", "open CF prefilter spool: "+err.Error())
@@ -696,7 +699,7 @@ func executeCFSpeedJob(job *cfSpeedJob, ranges []benchEndpointRange, total uint6
 			continue
 		}
 		ctx, cancel := context.WithTimeout(job.ctx, 180*time.Second)
-		result := runDirectCFSpeed(ctx, endpoint, cfSpeedBytes)
+		result := runDirectCFSpeed(ctx, endpoint, job.precisionBytes, job.egress)
 		cancel()
 		if meta, ok := cachedIPMetadata(endpoint.IP); ok {
 			result.Meta = meta
@@ -755,6 +758,19 @@ func handleCFSpeedStart(w http.ResponseWriter, r *http.Request) {
 	}
 	workers := clampInt(request.Workers, 1, cfSpeedMaxWorkers, cfSpeedDefaultWorkers)
 	quickWorkers := clampInt(request.QuickWorkers, 1, cfQuickMaxWorkers, cfQuickDefaultWorkers)
+	precisionMB := request.PrecisionMB
+	if precisionMB == 0 {
+		precisionMB = int(cfSpeedBytes / 1_000_000)
+	}
+	if precisionMB < 5 || precisionMB > 80 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "precision_mb must be between 5 and 80"})
+		return
+	}
+	egress, err := normalizeEgress(request.EgressMode, request.WARPProxy)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
 	tcpTimeoutSeconds := clampFloat(request.Timeout, 0.2, 5, 1.5)
 	tcpTimeout := time.Duration(tcpTimeoutSeconds * float64(time.Second))
 	cfSpeedJobs.cleanupOld(time.Now())
@@ -765,7 +781,7 @@ func handleCFSpeedStart(w http.ResponseWriter, r *http.Request) {
 		}
 		seedIPMetadata(meta, metadataImportedTTL)
 	}
-	job := &cfSpeedJob{id: newJobID(), startedAt: time.Now(), ctx: ctx, cancel: cancel, total: total, status: "queued", phase: "queued"}
+	job := &cfSpeedJob{id: newJobID(), startedAt: time.Now(), ctx: ctx, cancel: cancel, total: total, egress: egress, precisionBytes: int64(precisionMB) * 1_000_000, status: "queued", phase: "queued"}
 	cfSpeedJobs.put(job)
 	go executeCFSpeedJob(job, ranges, total, workers, quickWorkers, tcpTimeout)
 	writeJSON(w, http.StatusAccepted, map[string]any{
@@ -774,7 +790,8 @@ func handleCFSpeedStart(w http.ResponseWriter, r *http.Request) {
 		"top_limit":         cfSpeedTopLimit,
 		"quick_bytes":       cfQuickBytes,
 		"quick_timeout_s":   cfQuickTimeout.Seconds(),
-		"download_bytes":    cfSpeedBytes,
+		"download_bytes":    job.precisionBytes,
+		"egress_mode":       egress.Mode,
 		"default_port":      request.Port,
 		"prefilter_workers": workers,
 		"quick_workers":     quickWorkers,

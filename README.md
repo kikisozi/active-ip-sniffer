@@ -34,6 +34,15 @@ TCP 扫描结果区提供“填入 VLESS 测试”按钮，会读取本次任务
 
 VLESS URI 仅用于当前内存任务：不会写入扫描结果文件、不会出现在测速 CSV、程序也不会主动把 URI 写入日志。测速 CSV 只包含候选 IP、各阶段延迟、吞吐量和失败阶段。
 
+## v3.4：WARP 可选出口 / 用户测速 / 智能 DNS
+
+- 服务器后端与本地 `v probe` 都支持 **Direct / WARP Local Proxy** 两种测试出口。WARP 模式使用本机 SOCKS5 Local Proxy（默认 `127.0.0.1:40000`），只代理本程序发起的 TCP/CF/VLESS 外层连接，不强制修改整机默认路由。
+- 新增独立用户测速 WebUI，默认端口 `18768`，与总控管理端口分离。总控可以把当前 CF Top 候选发布给用户；用户网页连接自己电脑上的 `v probe`，从用户真实网络出口运行 1 MB / 2 秒快筛和较轻量的 20 MB 精测，然后仅把 Top 5 回传总控。
+- 总控“用户测速 / 智能 DNS”页按提交者 IP 的地区/ASN/ISP 展示结果，点击提交者可展开其 Top 5。
+- 最近 7 天用户提交会按电信、联通、移动和默认线路聚合，自动计算每个候选 IP 的峰值速度中位数、峰值均值、平均速度中位数与样本数；智能 DNS 计划优先按峰值中位数排序，降低单次异常峰值的影响。WARP/系统 WARP 提交不会进入自动 DNS 计划，只保留供人工比较。
+- 集成 DNSPod 智能解析：支持每线路 Top 1-5、最少提交者门槛、TTL、手动应用，以及 5-1440 分钟的可选自动更新。程序只修改带 `active-ip-sniffer smart dns` 备注的托管 A 记录；遇到同主机/同线路的未托管 A 记录会拒绝覆盖。
+- 建议 Cloudflare 主域继续保留在 Cloudflare，把一个独立子域委派给 DNSPod，业务域名再 CNAME 到该智能解析名称，从而使用 DNSPod 的电信/联通/移动线路返回不同的优选 IP 集合。
+
 ## v3.3：CF Direct 两阶段测速 / CSV / 元数据筛选
 
 - **CF Direct 两阶段测速**：候选 IP 直接承载 `speed.cloudflare.com` 的 TLS SNI / HTTP Host，不经过 VLESS 或 Xray。
@@ -146,7 +155,7 @@ v probe
 探针会输出：
 
 ```text
-Active IP Sniffer 3.3.0 local probe: http://127.0.0.1:18767
+Active IP Sniffer 3.4.0 local probe: http://127.0.0.1:18767
 Local probe token: <随机 Token>
 ```
 

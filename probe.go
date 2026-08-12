@@ -70,6 +70,7 @@ func (a *app) probeRoutes(token string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/info", a.handleInfo)
 	mux.HandleFunc("/api/network-info", handleNetworkInfo("local-probe"))
+	mux.HandleFunc("/api/egress/check", handleEgressCheck("local-probe"))
 	mux.HandleFunc("/api/scan/start", a.handleStart)
 	mux.HandleFunc("/api/scan/job", a.handleJob)
 	mux.HandleFunc("/api/scan/cancel", a.handleCancel)
