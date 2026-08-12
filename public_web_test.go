@@ -1,6 +1,8 @@
 package main
 
 import (
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -42,5 +44,28 @@ func TestPlanLinesForDNSPodMinimumSubmitters(t *testing.T) {
 	desired := planLinesForDNSPod(plans, 2)
 	if len(desired) != 1 || len(desired["电信"]) != 1 || desired["电信"][0] != "1.1.1.1" {
 		t.Fatalf("unexpected desired lines: %#v", desired)
+	}
+}
+
+func TestPublicProbeScriptsUseCurrentPublicOrigin(t *testing.T) {
+	dir := t.TempDir()
+	a := &app{public: newPublicBenchmarkStore(dir)}
+	server := httptest.NewServer(a.publicRoutes())
+	defer server.Close()
+	for _, path := range []string{"/probe.sh", "/probe.ps1"} {
+		response, err := server.Client().Get(server.URL + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		data := make([]byte, 256*1024)
+		n, readErr := response.Body.Read(data)
+		_ = response.Body.Close()
+		if readErr != nil && n == 0 {
+			t.Fatalf("read %s: %v", path, readErr)
+		}
+		text := string(data[:n])
+		if strings.Contains(text, "__AIS_USER_WEB_URL__") || !strings.Contains(text, server.URL) {
+			t.Fatalf("%s did not embed server URL", path)
+		}
 	}
 }

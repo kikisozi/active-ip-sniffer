@@ -8,6 +8,7 @@ $Proxy = "127.0.0.1:$Port"
 $TraceUrl = "https://www.cloudflare.com/cdn-cgi/trace"
 $Marker = "ActiveIPSniffer managed Local Proxy"
 $MdmFile = Join-Path $env:ProgramData "Cloudflare\mdm.xml"
+$ProjectMarker = Join-Path $env:ProgramData "ActiveIPSniffer\warp-local-proxy-managed"
 
 function Test-Admin {
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -142,7 +143,12 @@ switch ($Action) {
         & $cli connect *> $null
         if ($LASTEXITCODE -ne 0) { throw "warp-cli connect failed" }
         for ($i=0; $i -lt 15; $i++) {
-            if (Test-Proxy) { [void](Show-Status); exit 0 }
+            if (Test-Proxy) {
+                New-Item -ItemType Directory -Force -Path (Split-Path $ProjectMarker) | Out-Null
+                "proxy=$Proxy" | Set-Content -Encoding ASCII -Path $ProjectMarker
+                [void](Show-Status)
+                exit 0
+            }
             Start-Sleep -Seconds 1
         }
         throw "$Proxy did not pass warp=on/plus verification; Active IP Sniffer Auto will use Direct"
@@ -151,6 +157,7 @@ switch ($Action) {
         Ensure-Admin
         $cli = Find-WarpCli
         if ($cli) { & $cli disconnect *> $null }
+        Remove-Item -Force -ErrorAction SilentlyContinue $ProjectMarker
         Write-Host "WARP disconnected; Active IP Sniffer Auto will use Direct"
     }
     "status" { if (Show-Status) { exit 0 } else { exit 1 } }

@@ -122,7 +122,7 @@ func handleEgressCheck(role string) http.HandlerFunc {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		selected, info, err := resolveEgress(r.Context(), requested)
+		selected, info, err := resolveScanEgress(r.Context(), requested)
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 			return

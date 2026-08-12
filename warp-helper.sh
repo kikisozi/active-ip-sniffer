@@ -6,6 +6,7 @@ PROXY="127.0.0.1:${PORT}"
 TRACE_URL="https://www.cloudflare.com/cdn-cgi/trace"
 MDM_FILE="/var/lib/cloudflare-warp/mdm.xml"
 MARKER="ActiveIPSniffer managed Local Proxy"
+PROJECT_MARKER="/var/lib/active-ip-sniffer/warp-local-proxy-managed"
 ACTION="${1:-status}"
 
 say() { printf '%s\n' "$*"; }
@@ -119,6 +120,9 @@ case "$ACTION" in
     i=0
     while [ "$i" -lt 15 ]; do
       if proxy_ok; then
+        mkdir -p "$(dirname "$PROJECT_MARKER")"
+        printf 'proxy=%s\n' "$PROXY" > "$PROJECT_MARKER"
+        chmod 600 "$PROJECT_MARKER"
         say "WARP Local Proxy 已启用：${PROXY}"
         trace_proxy | grep -E '^(ip|warp|colo)=' || true
         exit 0
@@ -131,6 +135,7 @@ case "$ACTION" in
     need_root
     command -v warp-cli >/dev/null 2>&1 || exit 0
     warp-cli disconnect >/dev/null 2>&1 || true
+    rm -f "$PROJECT_MARKER"
     say "WARP 已断开；Active IP Sniffer Auto 将使用 Direct"
     ;;
   status)

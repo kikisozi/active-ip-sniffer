@@ -25,13 +25,14 @@ import (
 )
 
 const (
-	vlessBenchMaxCandidates = 128
-	vlessBenchTCPAttempts   = 3
-	vlessBenchDefaultMB     = 30
-	vlessBenchMaxMB         = 100
-	vlessBenchDefaultTarget = "speed.cloudflare.com"
-	vlessBenchTargetPort    = 443
-	websocketMagic          = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+	vlessBenchMaxCandidates   = 128
+	vlessBenchTCPAttempts     = 3
+	vlessBenchDefaultMB       = 30
+	vlessBenchMaxMB           = 100
+	vlessBenchDownloadTimeout = 5 * time.Second
+	vlessBenchDefaultTarget   = "speed.cloudflare.com"
+	vlessBenchTargetPort      = 443
+	websocketMagic            = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 )
 
 type vlessEndpointConfig struct {
@@ -643,6 +644,7 @@ func runVLESSBenchCandidate(ctx context.Context, cfg vlessEndpointConfig, candid
 	}
 
 	bodyStarted := time.Now()
+	_ = innerTLS.SetReadDeadline(bodyStarted.Add(vlessBenchDownloadTimeout))
 	windowStarted := bodyStarted
 	buffer := make([]byte, 64*1024)
 	var total int64
@@ -650,7 +652,7 @@ func runVLESSBenchCandidate(ctx context.Context, cfg vlessEndpointConfig, candid
 	var bytesAt3 int64
 	var windowBytes int64
 	var peakMbps float64
-	for {
+	for total < bytesWanted {
 		n, readErr := response.Body.Read(buffer)
 		if n > 0 {
 			total += int64(n)
@@ -672,12 +674,18 @@ func runVLESSBenchCandidate(ctx context.Context, cfg vlessEndpointConfig, candid
 		}
 		if readErr != nil {
 			if !errors.Is(readErr, io.EOF) {
-				result.FailureStage = "download"
-				result.Error = "speed body: " + readErr.Error()
+				if netErr, ok := readErr.(net.Error); ok && netErr.Timeout() {
+					result.FailureStage = "download_timeout"
+					result.Error = fmt.Sprintf("30 MB download did not complete within %.0f seconds", vlessBenchDownloadTimeout.Seconds())
+				} else {
+					result.FailureStage = "download"
+					result.Error = "speed body: " + readErr.Error()
+				}
 			}
 			break
 		}
 	}
+	_ = innerTLS.SetReadDeadline(time.Time{})
 	elapsed := time.Since(bodyStarted)
 	if finalWindow := time.Since(windowStarted); windowBytes > 0 && finalWindow >= 100*time.Millisecond {
 		peakMbps = math.Max(peakMbps, bitsPerSecondMbps(windowBytes, finalWindow))
@@ -698,8 +706,15 @@ func runVLESSBenchCandidate(ctx context.Context, cfg vlessEndpointConfig, candid
 	} else {
 		result.StableMbps = roundFloat(bitsPerSecondMbps(total, elapsed), 1)
 	}
-	if result.Error == "" && total > 0 {
+	if result.Error == "" && elapsed > vlessBenchDownloadTimeout {
+		result.FailureStage = "download_timeout"
+		result.Error = fmt.Sprintf("30 MB download did not complete within %.0f seconds", vlessBenchDownloadTimeout.Seconds())
+	}
+	if result.Error == "" && total == bytesWanted && elapsed <= vlessBenchDownloadTimeout {
 		result.Status = "ok"
+	} else if result.Error == "" {
+		result.FailureStage = "download"
+		result.Error = fmt.Sprintf("downloaded %d bytes, expected %d", total, bytesWanted)
 	}
 	return result
 }
@@ -769,26 +784,15 @@ func handleVLESSBenchStart(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	bytesMB := request.BytesMB
-	if bytesMB == 0 {
-		bytesMB = vlessBenchDefaultMB
-	}
-	if bytesMB < 1 || bytesMB > vlessBenchMaxMB {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("bytes_mb must be between 1 and %d", vlessBenchMaxMB)})
+	bytesMB := vlessBenchDefaultMB
+	if request.BytesMB != 0 && request.BytesMB != vlessBenchDefaultMB {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("VLESS benchmark is fixed at %d MB", vlessBenchDefaultMB)})
 		return
 	}
 	timeoutSeconds := clampFloat(request.Timeout, 2, 20, 12)
 	timeout := time.Duration(timeoutSeconds * float64(time.Second))
-	requestedEgress, err := normalizeEgress(request.EgressMode, request.WARPProxy)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
-	egress, _, err := resolveEgress(r.Context(), requestedEgress)
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-		return
-	}
+	requestedEgress := egressConfig{Mode: "direct", WARPProxy: defaultWARPProxy}
+	egress := requestedEgress
 	vlessBenchJobs.cleanupOld(time.Now())
 	ctx, cancel := context.WithCancel(context.Background())
 	id := newJobID()
@@ -799,6 +803,7 @@ func handleVLESSBenchStart(w http.ResponseWriter, r *http.Request) {
 		"id":                    id,
 		"candidates":            len(candidates),
 		"bytes_mb":              bytesMB,
+		"download_timeout_s":    vlessBenchDownloadTimeout.Seconds(),
 		"target":                vlessBenchDefaultTarget,
 		"requested_egress_mode": requestedEgress.Mode,
 		"egress_mode":           egress.Mode,

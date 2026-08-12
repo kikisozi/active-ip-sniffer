@@ -7,6 +7,10 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -76,6 +80,73 @@ func resolveEgress(ctx context.Context, requested egressConfig) (egressConfig, e
 	default:
 		return requested, egressInfo{}, fmt.Errorf("unsupported egress mode: %s", requested.Mode)
 	}
+}
+
+// resolveScanEgress is deliberately used only by active scanning. It may try
+// to reconnect an already-installed WARP client before falling back to Direct.
+// Benchmark paths do not call this function because speed results must reflect
+// the machine's real/direct network path.
+func resolveScanEgress(ctx context.Context, requested egressConfig) (egressConfig, egressInfo, error) {
+	selected, info, err := resolveEgress(ctx, requested)
+	if requested.Mode == "direct" || (err == nil && selected.Mode == "warp") {
+		return selected, info, err
+	}
+	if requested.Mode != "auto" && requested.Mode != "warp" {
+		return selected, info, err
+	}
+	if !tryStartInstalledWARP(ctx) {
+		return selected, info, err
+	}
+	// Give the local proxy a short window to become ready after reconnecting.
+	deadline := time.Now().Add(4 * time.Second)
+	for {
+		selected, info, err = resolveEgress(ctx, requested)
+		if err == nil && selected.Mode == "warp" {
+			return selected, info, nil
+		}
+		if time.Now().After(deadline) || ctx.Err() != nil {
+			return selected, info, err
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+func tryStartInstalledWARP(ctx context.Context) bool {
+	if _, err := exec.LookPath("warp-cli"); err != nil {
+		return false
+	}
+	managed := false
+	switch runtime.GOOS {
+	case "linux":
+		_, err := os.Stat("/var/lib/active-ip-sniffer/warp-local-proxy-managed")
+		managed = err == nil
+	case "windows":
+		if programData := strings.TrimSpace(os.Getenv("ProgramData")); programData != "" {
+			_, err := os.Stat(filepath.Join(programData, "ActiveIPSniffer", "warp-local-proxy-managed"))
+			managed = err == nil
+		}
+	}
+	if !managed {
+		return false
+	}
+	commandCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	// If the project helper exists and we already have sufficient privilege,
+	// prefer it because it also restores MASQUE + proxy port 40099. We never
+	// invoke sudo/UAC from a background scan request.
+	if runtime.GOOS == "linux" && os.Geteuid() == 0 {
+		for _, helper := range []string{"/opt/active-ip-sniffer/warp-helper.sh", filepath.Join(filepath.Dir(os.Args[0]), "warp-helper.sh")} {
+			if info, statErr := os.Stat(helper); statErr == nil && !info.IsDir() {
+				if exec.CommandContext(commandCtx, helper, "on").Run() == nil {
+					return true
+				}
+				break
+			}
+		}
+	}
+	// Reconnecting an existing, already-configured client is safe and does not
+	// alter the machine's default route when the client is in Local Proxy mode.
+	return exec.CommandContext(commandCtx, "warp-cli", "connect").Run() == nil
 }
 
 func (e egressConfig) dialContext(ctx context.Context, network, address string, timeout time.Duration) (net.Conn, error) {

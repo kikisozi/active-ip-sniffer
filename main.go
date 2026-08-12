@@ -24,7 +24,7 @@ import (
 )
 
 const (
-	appVersion        = "3.4.1"
+	appVersion        = "3.5.0"
 	maxPorts          = 32
 	maxAttempts       = uint64(2_000_000)
 	maxWorkers        = 512
@@ -596,18 +596,23 @@ func (a *app) serveFile(w http.ResponseWriter, r *http.Request, path, filename, 
 
 func (a *app) handleInfo(w http.ResponseWriter, _ *http.Request) {
 	info := map[string]any{
-		"version":             appVersion,
-		"runtime":             "go",
-		"recent_result_limit": recentResultLimit,
-		"cf_quick_bytes":      cfQuickBytes,
-		"cf_quick_timeout_s":  cfQuickTimeout.Seconds(),
-		"cf_speed_bytes":      cfSpeedBytes,
-		"cf_top_limit":        cfSpeedTopLimit,
-		"cf_https_ports":      []int{443, 2053, 2083, 2087, 2096, 8443},
-		"probe_port":          defaultProbePort,
-		"default_egress_mode": "auto",
-		"warp_proxy":          defaultWARPProxy,
-		"egress_auto":         true,
+		"version":                  appVersion,
+		"runtime":                  "go",
+		"recent_result_limit":      recentResultLimit,
+		"cf_quick_bytes":           cfQuickBytes,
+		"cf_quick_timeout_s":       cfQuickTimeout.Seconds(),
+		"cf_speed_bytes":           cfSpeedBytes,
+		"cf_precision_timeout_s":   cfPrecisionTimeout.Seconds(),
+		"user_precision_bytes":     int64(publicPrecisionMB) * 1_000_000,
+		"user_precision_timeout_s": cfUserPrecisionTimeout.Seconds(),
+		"vless_bytes":              int64(vlessBenchDefaultMB) * 1_000_000,
+		"vless_download_timeout_s": vlessBenchDownloadTimeout.Seconds(),
+		"cf_top_limit":             cfSpeedTopLimit,
+		"cf_https_ports":           []int{443, 2053, 2083, 2087, 2096, 8443},
+		"probe_port":               defaultProbePort,
+		"default_egress_mode":      "auto",
+		"warp_proxy":               defaultWARPProxy,
+		"egress_auto":              true,
 	}
 	if a.settings != nil {
 		cfg := a.settings.snapshot()
@@ -647,7 +652,7 @@ func (a *app) handleStart(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	egress, _, err := resolveEgress(r.Context(), requestedEgress)
+	egress, _, err := resolveScanEgress(r.Context(), requestedEgress)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return

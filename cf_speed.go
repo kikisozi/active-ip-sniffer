@@ -23,16 +23,18 @@ import (
 )
 
 const (
-	cfQuickBytes          int64  = 1_000_000
-	cfQuickTimeout               = 2 * time.Second
-	cfSpeedBytes          int64  = 80_000_000
-	cfSpeedTopLimit              = 20
-	cfSpeedMaxInput       uint64 = 2_000_000
-	cfSpeedDefaultWorkers        = 64
-	cfSpeedMaxWorkers            = 256
-	cfQuickDefaultWorkers        = 4
-	cfQuickMaxWorkers            = 8
-	cfSpeedWindow                = 250 * time.Millisecond
+	cfQuickBytes           int64  = 1_000_000
+	cfQuickTimeout                = 2 * time.Second
+	cfSpeedBytes           int64  = 80_000_000
+	cfPrecisionTimeout            = 8 * time.Second
+	cfUserPrecisionTimeout        = 5 * time.Second
+	cfSpeedTopLimit               = 20
+	cfSpeedMaxInput        uint64 = 2_000_000
+	cfSpeedDefaultWorkers         = 64
+	cfSpeedMaxWorkers             = 256
+	cfQuickDefaultWorkers         = 4
+	cfQuickMaxWorkers             = 8
+	cfSpeedWindow                 = 250 * time.Millisecond
 )
 
 var cfHTTPSPorts = map[int]struct{}{
@@ -97,13 +99,14 @@ type cfSpeedStartRequest struct {
 }
 
 type cfSpeedJob struct {
-	id             string
-	startedAt      time.Time
-	ctx            context.Context
-	cancel         context.CancelFunc
-	total          uint64
-	egress         egressConfig
-	precisionBytes int64
+	id               string
+	startedAt        time.Time
+	ctx              context.Context
+	cancel           context.CancelFunc
+	total            uint64
+	egress           egressConfig
+	precisionBytes   int64
+	precisionTimeout time.Duration
 
 	prefilterDone atomic.Uint64
 	quickDone     atomic.Uint64
@@ -188,23 +191,24 @@ func (j *cfSpeedJob) snapshot() map[string]any {
 		}
 	}
 	return map[string]any{
-		"id":              j.id,
-		"status":          status,
-		"phase":           phase,
-		"message":         message,
-		"input_total":     j.total,
-		"prefilter_done":  j.prefilterDone.Load(),
-		"quick_done":      j.quickDone.Load(),
-		"quick_passed":    j.quickPassed.Load(),
-		"selected":        selected,
-		"download_done":   j.downloadDone.Load(),
-		"passed":          j.passed.Load(),
-		"failed":          j.failed.Load(),
-		"top20_passed":    passed,
-		"quick_bytes":     cfQuickBytes,
-		"quick_timeout_s": cfQuickTimeout.Seconds(),
-		"download_bytes":  j.precisionBytes,
-		"results":         results,
+		"id":                  j.id,
+		"status":              status,
+		"phase":               phase,
+		"message":             message,
+		"input_total":         j.total,
+		"prefilter_done":      j.prefilterDone.Load(),
+		"quick_done":          j.quickDone.Load(),
+		"quick_passed":        j.quickPassed.Load(),
+		"selected":            selected,
+		"download_done":       j.downloadDone.Load(),
+		"passed":              j.passed.Load(),
+		"failed":              j.failed.Load(),
+		"top20_passed":        passed,
+		"quick_bytes":         cfQuickBytes,
+		"quick_timeout_s":     cfQuickTimeout.Seconds(),
+		"download_bytes":      j.precisionBytes,
+		"precision_timeout_s": j.precisionTimeout.Seconds(),
+		"results":             results,
 	}
 }
 
@@ -439,7 +443,7 @@ func quickFilterCFSpeedEndpoints(job *cfSpeedJob, spoolPath string, inputCount, 
 					return
 				}
 				ctx, cancel := context.WithTimeout(job.ctx, cfQuickTimeout)
-				result := runDirectCFSpeed(ctx, endpoint, cfQuickBytes, job.egress)
+				result := runDirectCFSpeed(ctx, endpoint, cfQuickBytes, job.egress, cfQuickTimeout)
 				cancel()
 				job.quickDone.Add(1)
 				if result.Status != "ok" {
@@ -509,10 +513,12 @@ type speedTraceTimes struct {
 	firstByte    time.Time
 }
 
-func runDirectCFSpeed(ctx context.Context, endpoint benchEndpoint, bytesWanted int64, egress egressConfig) cfSpeedResult {
+func runDirectCFSpeed(ctx context.Context, endpoint benchEndpoint, bytesWanted int64, egress egressConfig, transferTimeout time.Duration) cfSpeedResult {
 	result := cfSpeedResult{IP: endpoint.IP, Port: endpoint.Port, Status: "failed"}
 	requestStart := time.Now()
 	traceTimes := &speedTraceTimes{}
+	requestCtx, requestCancel := context.WithCancel(ctx)
+	defer requestCancel()
 	transport := &http.Transport{
 		Proxy: nil,
 		DialContext: func(dialCtx context.Context, _, _ string) (net.Conn, error) {
@@ -537,7 +543,7 @@ func runDirectCFSpeed(ctx context.Context, endpoint benchEndpoint, bytesWanted i
 		host += ":" + strconv.Itoa(endpoint.Port)
 	}
 	requestURL := "https://" + host + "/__down?bytes=" + strconv.FormatInt(bytesWanted, 10)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, requestURL, nil)
 	if err != nil {
 		result.Error = err.Error()
 		result.FailureStage = "request"
@@ -571,12 +577,21 @@ func runDirectCFSpeed(ctx context.Context, endpoint benchEndpoint, bytesWanted i
 	}
 
 	bodyStart := time.Now()
+	var transferTimedOut atomic.Bool
+	var transferTimer *time.Timer
+	if transferTimeout > 0 {
+		transferTimer = time.AfterFunc(transferTimeout, func() {
+			transferTimedOut.Store(true)
+			requestCancel()
+		})
+		defer transferTimer.Stop()
+	}
 	windowStart := bodyStart
 	buffer := make([]byte, 64*1024)
 	var total int64
 	var windowBytes int64
 	var peak float64
-	for {
+	for total < bytesWanted {
 		n, readErr := resp.Body.Read(buffer)
 		if n > 0 {
 			total += int64(n)
@@ -591,8 +606,13 @@ func runDirectCFSpeed(ctx context.Context, endpoint benchEndpoint, bytesWanted i
 		}
 		if readErr != nil {
 			if !errors.Is(readErr, io.EOF) {
-				result.FailureStage = "download"
-				result.Error = readErr.Error()
+				if transferTimedOut.Load() {
+					result.FailureStage = "download_timeout"
+					result.Error = fmt.Sprintf("download did not complete within %.0f seconds", transferTimeout.Seconds())
+				} else {
+					result.FailureStage = "download"
+					result.Error = readErr.Error()
+				}
 			}
 			break
 		}
@@ -608,7 +628,11 @@ func runDirectCFSpeed(ctx context.Context, endpoint benchEndpoint, bytesWanted i
 	result.PeakMbps = roundFloat(peak, 1)
 	result.AverageMbps = roundFloat(bitsPerSecondMbps(total, transferElapsed), 1)
 	result.EffectiveMbps = roundFloat(bitsPerSecondMbps(total, finish.Sub(requestStart)), 1)
-	if result.Error == "" && total == bytesWanted {
+	if (transferTimedOut.Load() || transferElapsed > transferTimeout) && result.Error == "" && (total < bytesWanted || transferElapsed > transferTimeout) {
+		result.FailureStage = "download_timeout"
+		result.Error = fmt.Sprintf("download did not complete within %.0f seconds", transferTimeout.Seconds())
+	}
+	if result.Error == "" && total == bytesWanted && transferElapsed <= transferTimeout {
 		result.Status = "ok"
 		return result
 	}
@@ -698,8 +722,8 @@ func executeCFSpeedJob(job *cfSpeedJob, ranges []benchEndpointRange, total uint6
 			job.downloadDone.Add(1)
 			continue
 		}
-		ctx, cancel := context.WithTimeout(job.ctx, 180*time.Second)
-		result := runDirectCFSpeed(ctx, endpoint, job.precisionBytes, job.egress)
+		ctx, cancel := context.WithTimeout(job.ctx, 20*time.Second)
+		result := runDirectCFSpeed(ctx, endpoint, job.precisionBytes, job.egress, job.precisionTimeout)
 		cancel()
 		if meta, ok := cachedIPMetadata(endpoint.IP); ok {
 			result.Meta = meta
@@ -766,15 +790,11 @@ func handleCFSpeedStart(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "precision_mb must be between 5 and 80"})
 		return
 	}
-	requestedEgress, err := normalizeEgress(request.EgressMode, request.WARPProxy)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
-	egress, _, err := resolveEgress(r.Context(), requestedEgress)
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-		return
+	requestedEgress := egressConfig{Mode: "direct", WARPProxy: defaultWARPProxy}
+	egress := requestedEgress
+	precisionTimeout := cfPrecisionTimeout
+	if precisionMB <= 30 {
+		precisionTimeout = cfUserPrecisionTimeout
 	}
 	tcpTimeoutSeconds := clampFloat(request.Timeout, 0.2, 5, 1.5)
 	tcpTimeout := time.Duration(tcpTimeoutSeconds * float64(time.Second))
@@ -786,7 +806,7 @@ func handleCFSpeedStart(w http.ResponseWriter, r *http.Request) {
 		}
 		seedIPMetadata(meta, metadataImportedTTL)
 	}
-	job := &cfSpeedJob{id: newJobID(), startedAt: time.Now(), ctx: ctx, cancel: cancel, total: total, egress: egress, precisionBytes: int64(precisionMB) * 1_000_000, status: "queued", phase: "queued"}
+	job := &cfSpeedJob{id: newJobID(), startedAt: time.Now(), ctx: ctx, cancel: cancel, total: total, egress: egress, precisionBytes: int64(precisionMB) * 1_000_000, precisionTimeout: precisionTimeout, status: "queued", phase: "queued"}
 	cfSpeedJobs.put(job)
 	go executeCFSpeedJob(job, ranges, total, workers, quickWorkers, tcpTimeout)
 	writeJSON(w, http.StatusAccepted, map[string]any{
@@ -796,6 +816,7 @@ func handleCFSpeedStart(w http.ResponseWriter, r *http.Request) {
 		"quick_bytes":           cfQuickBytes,
 		"quick_timeout_s":       cfQuickTimeout.Seconds(),
 		"download_bytes":        job.precisionBytes,
+		"precision_timeout_s":   precisionTimeout.Seconds(),
 		"requested_egress_mode": requestedEgress.Mode,
 		"egress_mode":           egress.Mode,
 		"default_port":          request.Port,

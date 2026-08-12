@@ -30,9 +30,19 @@ TCP 扫描结果区提供“填入 VLESS 测试”按钮，会读取本次任务
 
 候选 IP **只替换 VLESS URI 的连接地址**；UUID、端口、SNI、Host、Path 都保持原值。因此一个 IP 只有在完整 VLESS 出站也成功后才会标记为“通过”，可以排除“443 可达但节点实际不能用”的误判。
 
-测速默认每个成功 IP 下载 30 MB，且候选 IP 串行测试，避免多个测速任务同时抢占 VPS 带宽而影响排名。最多一次提交 128 个候选 IP；每个候选下载量可设置为 1-100 MB。
+测速固定每个成功 IP 下载 30 MB，且候选 IP 串行测试，避免多个测速任务同时抢占 VPS 带宽而影响排名。30 MB 正文必须在 5 秒内完整完成，否则立即按 `download_timeout` 淘汰。最多一次提交 128 个候选 IP。
 
 VLESS URI 仅用于当前内存任务：不会写入扫描结果文件、不会出现在测速 CSV、程序也不会主动把 URI 写入日志。测速 CSV 只包含候选 IP、各阶段延迟、吞吐量和失败阶段。
+
+## v3.5：扫描 WARP / 测速 Direct / 独立用户探针
+
+- **出口职责彻底拆分**：大范围 IP/TCP 扫描使用 `Auto → WARP 40099 → Direct`；CF Direct 和 VLESS 测速无论 WebUI 选择什么，都由后端强制使用当前检测机器的真实 `Direct` 出口，避免 WARP 路由污染排名。
+- Auto 扫描在发现本机已安装但断开的 WARP 客户端时，会尝试重新连接；Linux 服务器可继续使用 `v warp on` 安装/配置 Cloudflare Local Proxy `127.0.0.1:40099`。Local Proxy 只承载显式送入 SOCKS5 的扫描连接，不改变其他应用的默认路由。
+- CF Direct 保持 `1 MB / 2 秒` 快筛，80 MB 精测增加 **8 秒正文硬截止**；8 秒内未完整收到 80,000,000 bytes 即关闭连接并淘汰。
+- VLESS 固定 `30 MB / 5 秒`；只下载到一部分不再算通过，必须在 5 秒内完整完成 30 MB。
+- 用户测速页改用独立轻量 `active-ip-user-probe`，不需要安装完整 Active IP Sniffer。用户执行页面给出的单条命令后，探针会自动寻找 localhost 端口、在控制台打印端口、自动打开用户 Web，并通过 URL fragment 自动配置会话 Token；用户不再复制 Token。
+- 用户探针固定 Direct，并使用 `1 MB / 2 秒 → 30 MB / 5 秒`，只提交 Top 5。页面显著提示关闭 VPN/WARP/代理；候选 IPv4 只显示前两个段，例如 `47.242.*.*`。
+- 独立用户探针提供 Windows amd64/arm64、Linux amd64/arm64、macOS amd64/arm64 和 Android arm64 构建。Android 第一版使用 Termux 一条命令启动；iOS 暂不在本版范围内。
 
 ## v3.4.1：探针兼容修复 / Auto WARP 40099
 
@@ -44,7 +54,7 @@ VLESS URI 仅用于当前内存任务：不会写入扫描结果文件、不会�
 ## v3.4：WARP 可选出口 / 用户测速 / 智能 DNS
 
 - 服务器后端与本地 `v probe` 都支持 **Direct / WARP Local Proxy** 两种测试出口。WARP 模式使用本机 SOCKS5 Local Proxy（默认 `127.0.0.1:40099`），只代理本程序发起的 TCP/CF/VLESS 外层连接，不强制修改整机默认路由。
-- 新增独立用户测速 WebUI，默认端口 `18768`，与总控管理端口分离。总控可以把当前 CF Top 候选发布给用户；用户网页连接自己电脑上的 `v probe`，从用户真实网络出口运行 1 MB / 2 秒快筛和较轻量的 20 MB 精测，然后仅把 Top 5 回传总控。
+- 新增独立用户测速 WebUI，默认端口 `18768`，与总控管理端口分离。总控可以把当前 CF Top 候选发布给用户；v3.5 起用户页使用独立轻量探针，从用户真实网络出口运行 1 MB / 2 秒快筛和 30 MB / 5 秒精测，然后仅把 Top 5 回传总控。
 - 总控“用户测速 / 智能 DNS”页按提交者 IP 的地区/ASN/ISP 展示结果，点击提交者可展开其 Top 5。
 - 最近 7 天用户提交会按电信、联通、移动和默认线路聚合，自动计算每个候选 IP 的峰值速度中位数、峰值均值、平均速度中位数与样本数；智能 DNS 计划优先按峰值中位数排序，降低单次异常峰值的影响。WARP/系统 WARP 提交不会进入自动 DNS 计划，只保留供人工比较。
 - 集成 DNSPod 智能解析：支持每线路 Top 1-5、最少提交者门槛、TTL、手动应用，以及 5-1440 分钟的可选自动更新。程序只修改带 `active-ip-sniffer smart dns` 备注的托管 A 记录；遇到同主机/同线路的未托管 A 记录会拒绝覆盖。
@@ -52,9 +62,9 @@ VLESS URI 仅用于当前内存任务：不会写入扫描结果文件、不会�
 
 ## v3.3：CF Direct 两阶段测速 / CSV / 元数据筛选
 
-- **CF Direct 两阶段测速**：候选 IP 直接承载 `speed.cloudflare.com` 的 TLS SNI / HTTP Host，不经过 VLESS 或 Xray。
+- **CF Direct 两阶段测速**：候选 IP 直接承载 `speed.cloudflare.com` 的 TLS SNI / HTTP Host，不经过 VLESS 或 Xray，并强制使用当前检测机器的 Direct 出口。
 - 所有候选先做 TCP 可达性初筛；TCP 可达后先下载 **1,000,000 bytes**，必须在 **2 秒内完整完成**并通过 TLS/HTTP 验证才进入精测。
-- 1 MB 快筛通过者再串行下载 **80,000,000 bytes** 一次；串行精测避免多个候选同时抢宿主机带宽。
+- 1 MB 快筛通过者再串行下载 **80,000,000 bytes** 一次；80 MB 正文 8 秒未完整完成即淘汰。串行精测避免多个候选同时抢宿主机带宽。
 - 80 MB 阶段记录 TCP、TLS 握手、TLS 完成、TTFB、下载平均 Mbps、全程有效 Mbps、250 ms 窗口峰值 Mbps、下载传输耗时、完整总耗时和 HTTP 状态。
 - 最终排名改为 **成功 → 峰值速度 → 平均速度 → TTFB → TCP**，运行中与最终结果最多保留 Top 20。
 - 候选输入支持单 IP、`IP:端口`、CIDR、起止 IPv4 范围；默认 443，也可选择 Cloudflare 常见 HTTPS 端口 `2053/2083/2087/2096/8443`。
@@ -67,13 +77,13 @@ VLESS URI 仅用于当前内存任务：不会写入扫描结果文件、不会�
 
 ## v3.1：本地探针 / 当前出口 / Alpine
 
-- WebUI 顶部显示访问者 IP、服务器默认公网出口、当前检测/测速出口，以及 Cloudflare Trace 返回的 WARP/Colo 状态。
-- 检测来源可在 **服务器后端** 与 **本地探针**之间切换。服务器模式的 TCP、CF 1 MB / 80 MB、VLESS 测试由服务器发起；本地探针模式则从用户自己的 Windows/Linux/Alpine 机器发起。
+- WebUI 顶部显示访问者 IP、服务器默认公网出口、当前**扫描出口**，以及 Cloudflare Trace 返回的 WARP/Colo 状态。
+- 检测来源可在 **服务器后端** 与 **本地探针**之间切换。扫描出口可以 Auto/WARP/Direct；CF/VLESS 测速从 v3.5 起始终使用所选检测来源机器的 Direct 出口。
 - 本地探针仅监听 `127.0.0.1:18767`，每次启动随机生成 Probe Token；浏览器必须携带 Token 才能调用扫描/测速 API。Token 只保存在当前浏览器标签页的 `sessionStorage`，不会提交给中央 WebUI。
 - 浏览器访问 WebUI 后点击“本地探针配置教程”即可看到 Linux/Alpine、Windows 的完整安装与连接步骤。
 - Linux 安装脚本改为 POSIX `sh`，增加 `apk`、`zypper`、`pacman` 包管理器支持；常驻模式自动检测 systemd 或 OpenRC，Alpine 可使用 OpenRC 常驻。
 
-> 顶部“当前检测 / 测速出口”来自当前机器访问外部网络时的默认公网出口。若 WARP/VPN 对特定目标设置了 Split Tunnel，某个目标的实际路由仍可能与默认出口不同。
+> 顶部“当前扫描出口”用于大范围扫描。测速不复用该 WARP 设置，而是强制 Direct。
 
 ## 资源建议
 
@@ -151,7 +161,7 @@ rc-update show | grep active-ip-sniffer
 curl -fsSL "https://raw.githubusercontent.com/kikisozi/active-ip-sniffer/main/install.sh?cb=$(date +%s)" | sh
 ```
 
-## 本地探针模式
+## 管理员本地探针模式
 
 已安装本项目后，在**需要承担实际扫描/测速流量的那台机器**运行：
 
@@ -162,18 +172,44 @@ v probe
 探针会输出：
 
 ```text
-Active IP Sniffer 3.4.0 local probe: http://127.0.0.1:18767
+Active IP Sniffer 3.5.0 local probe: http://127.0.0.1:18767
 Local probe token: <随机 Token>
 ```
 
 保持终端运行，在中央 WebUI 点击“本地探针配置教程”，把 Token 粘贴进去并连接。连接成功后，将“检测来源”切换为“本地探针”。此时：
 
-- TCP 扫描连接由本地探针发出；
-- CF Direct 的 1 MB 快筛与 80 MB 精测都由本地探针下载；
-- VLESS Endpoint Bench 的 TCP/TLS/WS/VLESS/下载全部由本地探针执行；
+- TCP 扫描连接由本地探针发出，并可使用本机 WARP Local Proxy 40099；
+- CF Direct 的 1 MB / 80 MB 测速仍由本地探针执行，但强制使用本机 Direct；
+- VLESS Endpoint Bench 的 TCP/TLS/WS/VLESS/30 MB 下载全部由本地探针执行，并强制使用本机 Direct；
 - Cloudflare DNS Token 与 DNS 更新仍由中央 WebUI 服务器管理，不会传给本地探针。
 
-因此，**测速一定会消耗执行测速那台机器的网络流量**。服务器模式会消耗服务器/VPS 的月流量；本地探针模式会消耗用户本机或本地 VPS 的流量。WARP/VPN 只改变出口路径，不能把这些字节从宿主机流量统计中“消失”。
+因此，**测速一定会消耗执行测速那台机器的网络流量**。服务器模式会消耗服务器/VPS 的月流量；本地探针模式会消耗本地机器的流量。扫描 WARP 只改变扫描路径，不能让宿主机流量统计“消失”。
+
+## 普通用户轻量测速探针
+
+总控的独立用户页（默认 `:18768`）会直接展示各平台的一键命令。用户不需要安装完整后端，也不需要手工复制 Token。
+
+Windows PowerShell：
+
+```powershell
+irm http://SERVER:18768/probe.ps1 | iex
+```
+
+Linux / macOS：
+
+```bash
+curl -fsSL http://SERVER:18768/probe.sh | sh
+```
+
+Android Termux：
+
+```bash
+pkg install curl -y && curl -fsSL http://SERVER:18768/probe.sh | sh
+```
+
+脚本只下载 `active-ip-user-probe`。探针启动后会优先使用 `127.0.0.1:18767`，若被占用则自动寻找下一个空闲 loopback 端口；控制台打印实际端口并自动打开用户测速页。随机 Token 只放在 URL fragment 中，网页读取后立即保存到当前 `sessionStorage` 并清除地址栏 fragment，不会提交到中央服务器。
+
+用户探针不提供扫描、Cloudflare/DNSPod 凭据、管理 WebUI 或 WARP 管理能力，只执行 Direct 用户测速。页面会提示关闭 VPN/WARP/代理，候选 IPv4 对普通用户显示为 `A.B.*.*`。
 
 ### CSV 候选导入
 

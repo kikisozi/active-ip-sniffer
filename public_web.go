@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -19,8 +20,28 @@ import (
 const (
 	publicCandidateLimit  = 20
 	publicSubmissionLimit = 500
-	publicPrecisionMB     = 20
+	publicPrecisionMB     = 30
 )
+
+func publicRequestBaseURL(r *http.Request) (string, bool) {
+	host := strings.TrimSpace(r.Host)
+	if host == "" {
+		return "", false
+	}
+	for _, ch := range host {
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || strings.ContainsRune(".-:[]", ch) {
+			continue
+		}
+		return "", false
+	}
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	} else if strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https") {
+		scheme = "https"
+	}
+	return scheme + "://" + host, true
+}
 
 type publicCandidate struct {
 	IP   string     `json:"ip"`
@@ -339,6 +360,26 @@ func (a *app) handleSmartDNSPlan(w http.ResponseWriter, r *http.Request) {
 
 func (a *app) publicRoutes() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/probe.sh", func(w http.ResponseWriter, r *http.Request) {
+		base, ok := publicRequestBaseURL(r)
+		if !ok {
+			http.Error(w, "invalid host", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = io.WriteString(w, strings.ReplaceAll(userProbeShellScript, "__AIS_USER_WEB_URL__", base))
+	})
+	mux.HandleFunc("/probe.ps1", func(w http.ResponseWriter, r *http.Request) {
+		base, ok := publicRequestBaseURL(r)
+		if !ok {
+			http.Error(w, "invalid host", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = io.WriteString(w, strings.ReplaceAll(userProbePowerShellScript, "__AIS_USER_WEB_URL__", base))
+	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -354,7 +395,7 @@ func (a *app) publicRoutes() http.Handler {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"items": a.public.candidates(), "precision_mb": publicPrecisionMB, "quick_mb": 1, "quick_timeout_s": 2, "app_version": appVersion, "probe_port": defaultProbePort, "default_egress_mode": "auto", "warp_proxy": defaultWARPProxy})
+		writeJSON(w, http.StatusOK, map[string]any{"items": a.public.candidates(), "precision_mb": publicPrecisionMB, "quick_mb": 1, "quick_timeout_s": 2, "precision_timeout_s": 5, "app_version": appVersion, "probe_port": defaultProbePort, "default_egress_mode": "direct"})
 	})
 	mux.HandleFunc("/api/submit", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -417,16 +458,23 @@ func (a *app) publicRoutes() http.Handler {
 }
 
 const publicIndexHTML = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>优选 IP 用户测速</title><style>
-body{margin:0;background:#f4f6f9;color:#18202b;font:14px/1.5 system-ui,"Segoe UI","Microsoft YaHei",sans-serif}.wrap{max-width:900px;margin:auto;padding:18px}.card{background:#fff;border:1px solid #dfe4eb;border-radius:10px;margin-bottom:14px;padding:16px}.row{display:flex;gap:9px;align-items:center;flex-wrap:wrap}input,select,button{font:inherit;padding:9px 11px;border:1px solid #cbd3dd;border-radius:7px}button{font-weight:700;cursor:pointer;background:#2563eb;color:white;border-color:#2563eb}button:disabled{opacity:.45}.note{font-size:12px;color:#667085}.good{color:#087f5b}.bad{color:#c24141}.bar{height:9px;background:#e8edf3;border-radius:99px;overflow:hidden}.fill{height:100%;background:#2563eb;width:0}table{width:100%;border-collapse:collapse}th,td{padding:8px;border-bottom:1px solid #edf0f4;text-align:left}</style></head><body><div class="wrap">
-<div class="card"><h2>优选 IP 用户本地测速</h2><p>该页面把候选 IP 交给你电脑上的 <code>v probe</code>，真正的 TCP/TLS/下载流量从你的网络出口发出。浏览器本身不能把 TLS 的 SNI/Host 强制连接到任意候选 IP，因此准确模式需要本地探针。</p><div class="row"><input id="token" type="password" placeholder="Local probe token" style="min-width:300px"><select id="egress"><option value="auto">Auto（优先 WARP）</option><option value="direct">Direct 本地出口</option><option value="warp">WARP Local Proxy</option></select><input id="proxy" value="127.0.0.1:40099" placeholder="WARP SOCKS5 地址"><button id="connect">连接探针</button></div><p id="state" class="note">先在本机执行 <code>v probe</code>，再粘贴 Token。</p></div>
-<div class="card"><div class="row"><button id="start" disabled>开始本地测速并提交 Top 5</button><span id="progress" class="note">候选加载中…</span></div><div class="bar"><div id="fill" class="fill"></div></div></div>
-<div class="card"><h3>本次 Top 5</h3><table><thead><tr><th>#</th><th>IP</th><th>峰值</th><th>平均</th><th>TTFB</th></tr></thead><tbody id="rows"></tbody></table></div>
+body{margin:0;background:#f4f6f9;color:#18202b;font:14px/1.55 system-ui,"Segoe UI","Microsoft YaHei",sans-serif}.wrap{max-width:940px;margin:auto;padding:18px}.card{background:#fff;border:1px solid #dfe4eb;border-radius:12px;margin-bottom:14px;padding:17px}.row{display:flex;gap:9px;align-items:center;flex-wrap:wrap}button{font:inherit;padding:9px 12px;border:1px solid #2563eb;border-radius:7px;font-weight:700;cursor:pointer;background:#2563eb;color:#fff}button.secondary{background:#fff;color:#1f2937;border-color:#cbd3dd}button:disabled{opacity:.45}.note{font-size:12px;color:#667085}.good{color:#087f5b}.bad{color:#c24141}.warn{background:#fff7ed;border:1px solid #fed7aa;border-radius:9px;padding:12px;color:#9a3412}.code{display:flex;align-items:center;gap:8px;background:#101827;color:#e5edf8;border-radius:8px;padding:10px;margin-top:7px;overflow:auto}.code code{flex:1;white-space:nowrap}.code button{padding:5px 9px;background:#fff;color:#111827;border:0}.bar{height:9px;background:#e8edf3;border-radius:99px;overflow:hidden;margin-top:10px}.fill{height:100%;background:#2563eb;width:0}table{width:100%;border-collapse:collapse}th,td{padding:9px;border-bottom:1px solid #edf0f4;text-align:left}.pill{display:inline-block;padding:3px 8px;border-radius:99px;background:#eef2ff;color:#3730a3;font-size:12px}</style></head><body><div class="wrap">
+<div class="card"><h2>优选 IP 用户本地测速</h2><div class="warn"><b>测速前请关闭 VPN、系统 WARP、代理软件和浏览器代理插件。</b><br>测速必须走你的真实 Wi-Fi / 家宽 / 蜂窝网络，否则提交结果代表 VPN/代理出口，而不是你的运营商线路。测速会消耗本机流量。</div><p>用户测速固定使用 <b>Direct</b>：1 MB 必须在 2 秒内完成，随后 30 MB 必须在 5 秒内完成；超时直接淘汰。候选 IP 在页面中仅显示前两个 IPv4 段。</p><p id="state" class="note">尚未连接本地用户探针。执行下面与你系统对应的一条命令即可；脚本会自动下载轻量探针、启动 localhost 服务、打印本地端口并重新打开本页面，Token 会自动配置。</p></div>
+<div id="install" class="card"><h3>一键启动用户探针</h3><b>Windows PowerShell</b><div class="code"><code id="cmdWin"></code><button data-copy="cmdWin">复制</button></div><br><b>Linux / macOS</b><div class="code"><code id="cmdUnix"></code><button data-copy="cmdUnix">复制</button></div><br><b>Android（Termux）</b><div class="code"><code id="cmdAndroid"></code><button data-copy="cmdAndroid">复制</button></div><p class="note">Android 首次使用需要 Termux；命令会安装 curl 后下载 arm64 用户探针。iOS 暂不在本版范围内。</p></div>
+<div class="card"><div class="row"><span id="probeBadge" class="pill">探针未连接</span><button id="start" disabled>开始测速并提交 Top 5</button><span id="progress" class="note">候选加载中…</span></div><div class="bar"><div id="fill" class="fill"></div></div></div>
+<div class="card"><h3>本次 Top 5</h3><table><thead><tr><th>#</th><th>候选 IP</th><th>峰值</th><th>平均</th><th>TTFB</th></tr></thead><tbody id="rows"></tbody></table></div>
 </div><script>
-const $=s=>document.querySelector(s),probe='http://127.0.0.1:18767';let token='',candidates=[],job='',probeEgress={},resolvedMode='direct',probeVersion='';
+const $=s=>document.querySelector(s);let probe='',token='',candidates=[],job='',probeEgress={},probeVersion='';
+function maskIP(ip){const p=String(ip||'').split('.');if(p.length===4)return p[0]+'.'+p[1]+'.*.*';const h=String(ip||'').split(':');return h.slice(0,2).join(':')+':****'}
+function setCommands(){const o=location.origin;$('#cmdWin').textContent='irm '+o+'/probe.ps1 | iex';$('#cmdUnix').textContent='curl -fsSL '+o+'/probe.sh | sh';$('#cmdAndroid').textContent='pkg install curl -y && curl -fsSL '+o+'/probe.sh | sh'}
+async function copyCode(id,button){try{await navigator.clipboard.writeText($('#'+id).textContent);button.textContent='已复制';setTimeout(()=>button.textContent='复制',900)}catch(e){alert('复制失败，请手动复制命令')}}
+document.addEventListener('click',e=>{const b=e.target.closest('[data-copy]');if(b)copyCode(b.dataset.copy,b)});
+function importLaunch(){const p=new URLSearchParams(location.hash.replace(/^#/,'')),port=p.get('probe_port'),t=p.get('probe_token');if(port&&t){sessionStorage.setItem('ais_user_probe_port',port);sessionStorage.setItem('ais_user_probe_token',t);history.replaceState(null,'',location.pathname+location.search)}const savedPort=port||sessionStorage.getItem('ais_user_probe_port'),savedToken=t||sessionStorage.getItem('ais_user_probe_token');if(savedPort&&savedToken){probe='http://127.0.0.1:'+savedPort;token=savedToken}}
 async function pfetch(path,init={}){const h=new Headers(init.headers||{});h.set('X-Probe-Token',token);return fetch(probe+path,{...init,headers:h})}
-async function readJSON(r,label){const text=await r.text();let x={};if(text.trim()){try{x=JSON.parse(text)}catch(e){const raw=text.trim().replace(/\s+/g,' ').slice(0,180);if(r.status===404)throw new Error(label+'接口不存在，本机 v probe 版本过旧；请重新运行安装命令更新并重启 v probe');throw new Error(label+'返回非 JSON（HTTP '+r.status+'）：'+(raw||'<empty>'))}}if(!r.ok)throw new Error(x.error||label+'失败（HTTP '+r.status+'）');return x}
-fetch('/api/candidates').then(r=>r.json()).then(x=>{candidates=x.items||[];$('#progress').textContent=candidates.length?'已发布 '+candidates.length+' 个候选；精测 '+(x.precision_mb||20)+' MB':'当前没有发布候选';$('#start').dataset.mb=x.precision_mb||20}).catch(()=>$('#progress').textContent='候选读取失败');
-$('#connect').onclick=async()=>{token=$('#token').value.trim();if(token.length<16)return;const body={egress_mode:$('#egress').value,warp_proxy:$('#proxy').value.trim()};try{const ir=await pfetch('/api/info'),pi=await readJSON(ir,'本地探针信息');probeVersion=pi.version||'';const r=await pfetch('/api/egress/check',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),x=await readJSON(r,'出口验证');probeEgress=x.egress||{};resolvedMode=x.mode||'direct';$('#state').className='note good';$('#state').textContent='探针 v'+(probeVersion||'?')+' 已连接，'+(x.requested_mode||body.egress_mode)+' → '+resolvedMode+'，当前测速出口 '+(probeEgress.ip||'?')+' · '+(probeEgress.warp||'unknown')+' · '+(probeEgress.colo||'')+(x.auto_fallback?' · WARP 不可用，已自动 Direct':'');$('#start').disabled=!candidates.length}catch(e){$('#state').className='note bad';$('#state').textContent='连接失败：'+e.message;$('#start').disabled=true}};
-$('#start').onclick=async()=>{if(!candidates.length)return;$('#start').disabled=true;const body={targets:candidates.map(x=>x.ip+':'+x.port),port:443,timeout:1.5,workers:32,quick_workers:4,precision_mb:Number($('#start').dataset.mb||20),egress_mode:$('#egress').value,warp_proxy:$('#proxy').value.trim(),metadata:Object.fromEntries(candidates.filter(x=>x.meta).map(x=>[x.ip,x.meta]))};try{const r=await pfetch('/api/cf-speed/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),x=await readJSON(r,'测速启动');resolvedMode=x.egress_mode||resolvedMode;job=x.id;poll()}catch(e){$('#progress').textContent=e.message;$('#start').disabled=false}};
-async function poll(){const r=await pfetch('/api/cf-speed/job?id='+encodeURIComponent(job)),x=await readJSON(r,'测速任务');const den=x.phase==='quick'?(x.prefilter_done||1):x.phase==='download'?(x.selected||1):(x.input_total||1),done=x.phase==='quick'?(x.quick_done||0):x.phase==='download'?(x.download_done||0):(x.prefilter_done||0),pct=x.status==='complete'?100:Math.min(99,Math.round(done*100/den));$('#fill').style.width=pct+'%';$('#progress').textContent=(x.message||x.status)+' · '+pct+'%';if(x.status==='complete'){const top=(x.results||[]).filter(y=>y.status==='ok').slice(0,5);$('#rows').innerHTML=top.map((y,i)=>'<tr><td>'+(i+1)+'</td><td>'+y.ip+':'+y.port+'</td><td>'+y.peak_mbps+' Mbps</td><td>'+y.average_mbps+' Mbps</td><td>'+y.ttfb_ms+' ms</td></tr>').join('');const s=await fetch('/api/submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({egress_mode:resolvedMode,probe_egress:probeEgress,results:top})}),z=await s.json();$('#progress').textContent=s.ok?'测速完成，Top 5 已提交':'测速完成，但提交失败：'+(z.error||'未知错误');$('#start').disabled=false;return}if(['failed','cancelled'].includes(x.status)){ $('#progress').textContent=x.message||x.status;$('#start').disabled=false;return}setTimeout(poll,700)}
+async function readJSON(r,label){const text=await r.text();let x={};if(text.trim()){try{x=JSON.parse(text)}catch(e){const raw=text.trim().replace(/\s+/g,' ').slice(0,180);throw new Error(label+'返回非 JSON（HTTP '+r.status+'）：'+raw)}}if(!r.ok)throw new Error(x.error||label+'失败（HTTP '+r.status+'）');return x}
+async function connectProbe(){if(!probe||token.length<16)return;try{const info=await readJSON(await pfetch('/api/info'),'本地探针信息');probeVersion=info.version||'';const net=await readJSON(await pfetch('/api/network-info'),'本地网络信息');probeEgress=net.egress||{};const warp=String(probeEgress.warp||'').toLowerCase();$('#probeBadge').textContent='探针 v'+probeVersion+' · '+maskIP(probeEgress.ip||'?')+' · '+(probeEgress.colo||'');if(warp==='on'||warp==='plus'){$('#state').className='note bad';$('#state').textContent='检测到本机系统 WARP 正在生效。请关闭 WARP/VPN 后再测速，避免结果污染。';$('#start').disabled=true;return}$('#state').className='note good';$('#state').textContent='本地用户探针已自动连接：'+probe+'。当前真实出口 '+maskIP(probeEgress.ip||'?')+' · '+(probeEgress.colo||'')+'。';$('#install').style.display='none';$('#start').disabled=!candidates.length}catch(e){$('#state').className='note bad';$('#state').textContent='本地探针连接失败：'+e.message+'。请重新执行一键命令。';$('#start').disabled=true}}
+async function loadCandidates(){try{const x=await (await fetch('/api/candidates')).json();candidates=x.items||[];$('#progress').textContent=candidates.length?'已发布 '+candidates.length+' 个候选 · 1MB/2秒 → '+(x.precision_mb||30)+'MB/'+(x.precision_timeout_s||5)+'秒':'当前没有发布候选';if(probe&&token)await connectProbe()}catch(e){$('#progress').textContent='候选读取失败'}}
+$('#start').onclick=async()=>{if(!candidates.length||!probe)return;$('#start').disabled=true;$('#rows').innerHTML='';const body={targets:candidates.map(x=>x.ip+':'+x.port),port:443,precision_mb:30,egress_mode:'direct'};try{const x=await readJSON(await pfetch('/api/cf-speed/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),'测速启动');job=x.id;poll()}catch(e){$('#progress').textContent=e.message;$('#start').disabled=false}};
+async function poll(){try{const x=await readJSON(await pfetch('/api/cf-speed/job?id='+encodeURIComponent(job)),'测速任务');let den=x.input_total||1,done=0;if(x.phase==='quick'){done=x.quick_done||0}else if(x.phase==='download'){den=x.selected||1;done=x.download_done||0}else if(x.phase==='prefilter'){done=x.prefilter_done||0}const pct=x.status==='complete'?100:Math.min(99,Math.round(done*100/den));$('#fill').style.width=pct+'%';$('#progress').textContent=(x.message||x.status)+' · '+pct+'%';if(x.status==='complete'){const top=(x.results||[]).filter(y=>y.status==='ok').slice(0,5);$('#rows').innerHTML=top.map((y,i)=>'<tr><td>'+(i+1)+'</td><td>'+maskIP(y.ip)+'</td><td>'+Number(y.peak_mbps||0).toFixed(1)+' Mbps</td><td>'+Number(y.average_mbps||0).toFixed(1)+' Mbps</td><td>'+Number(y.ttfb_ms||0).toFixed(1)+' ms</td></tr>').join('');if(!top.length){$('#progress').textContent='没有候选在规定时间内完成测速';$('#start').disabled=false;return}const s=await fetch('/api/submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({egress_mode:'direct',probe_egress:probeEgress,results:top})}),z=await s.json();$('#progress').textContent=s.ok?'测速完成，脱敏 Top 5 已显示，完整结果已提交总控':'测速完成，但提交失败：'+(z.error||'未知错误');$('#start').disabled=false;return}if(['failed','cancelled'].includes(x.status)){ $('#progress').textContent=x.message||x.status;$('#start').disabled=false;return}setTimeout(poll,600)}catch(e){$('#progress').textContent=e.message;$('#start').disabled=false}}
+setCommands();importLaunch();loadCandidates();if(probe&&token)connectProbe();
 </script></body></html>`
