@@ -766,9 +766,14 @@ func handleCFSpeedStart(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "precision_mb must be between 5 and 80"})
 		return
 	}
-	egress, err := normalizeEgress(request.EgressMode, request.WARPProxy)
+	requestedEgress, err := normalizeEgress(request.EgressMode, request.WARPProxy)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	egress, _, err := resolveEgress(r.Context(), requestedEgress)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
 	tcpTimeoutSeconds := clampFloat(request.Timeout, 0.2, 5, 1.5)
@@ -785,16 +790,17 @@ func handleCFSpeedStart(w http.ResponseWriter, r *http.Request) {
 	cfSpeedJobs.put(job)
 	go executeCFSpeedJob(job, ranges, total, workers, quickWorkers, tcpTimeout)
 	writeJSON(w, http.StatusAccepted, map[string]any{
-		"id":                job.id,
-		"input_total":       total,
-		"top_limit":         cfSpeedTopLimit,
-		"quick_bytes":       cfQuickBytes,
-		"quick_timeout_s":   cfQuickTimeout.Seconds(),
-		"download_bytes":    job.precisionBytes,
-		"egress_mode":       egress.Mode,
-		"default_port":      request.Port,
-		"prefilter_workers": workers,
-		"quick_workers":     quickWorkers,
+		"id":                    job.id,
+		"input_total":           total,
+		"top_limit":             cfSpeedTopLimit,
+		"quick_bytes":           cfQuickBytes,
+		"quick_timeout_s":       cfQuickTimeout.Seconds(),
+		"download_bytes":        job.precisionBytes,
+		"requested_egress_mode": requestedEgress.Mode,
+		"egress_mode":           egress.Mode,
+		"default_port":          request.Port,
+		"prefilter_workers":     workers,
+		"quick_workers":         quickWorkers,
 	})
 }
 

@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-const defaultWARPProxy = "127.0.0.1:40000"
+const defaultWARPProxy = "127.0.0.1:40099"
 
 type egressConfig struct {
 	Mode      string `json:"egress_mode,omitempty"`
@@ -22,16 +22,16 @@ type egressConfig struct {
 func normalizeEgress(mode, proxy string) (egressConfig, error) {
 	mode = strings.ToLower(strings.TrimSpace(mode))
 	if mode == "" {
-		mode = "direct"
+		mode = "auto"
 	}
-	if mode != "direct" && mode != "warp" {
+	if mode != "auto" && mode != "direct" && mode != "warp" {
 		return egressConfig{}, fmt.Errorf("unsupported egress mode: %s", mode)
 	}
 	proxy = strings.TrimSpace(proxy)
 	if proxy == "" {
 		proxy = defaultWARPProxy
 	}
-	if mode == "warp" {
+	if mode == "warp" || mode == "auto" {
 		host, portText, err := net.SplitHostPort(proxy)
 		if err != nil || strings.TrimSpace(host) == "" {
 			return egressConfig{}, fmt.Errorf("invalid WARP local proxy: %s", proxy)
@@ -42,6 +42,40 @@ func normalizeEgress(mode, proxy string) (egressConfig, error) {
 		}
 	}
 	return egressConfig{Mode: mode, WARPProxy: proxy}, nil
+}
+
+func warpTraceActive(info egressInfo) bool {
+	warp := strings.ToLower(strings.TrimSpace(info.WARP))
+	return info.IP != "" && (warp == "on" || warp == "plus")
+}
+
+// resolveEgress resolves Auto once at task start so a single benchmark never
+// switches routes halfway through. Explicit WARP is accepted only when the
+// configured SOCKS5 endpoint actually produces a Cloudflare WARP trace.
+func resolveEgress(ctx context.Context, requested egressConfig) (egressConfig, egressInfo, error) {
+	switch requested.Mode {
+	case "direct":
+		direct := egressConfig{Mode: "direct", WARPProxy: requested.WARPProxy}
+		return direct, queryCloudflareTrace(ctx, direct), nil
+	case "warp":
+		info := queryCloudflareTrace(ctx, requested)
+		if info.IP == "" {
+			return requested, info, fmt.Errorf("WARP Local Proxy %s is not reachable or cannot reach Cloudflare", requested.WARPProxy)
+		}
+		if !warpTraceActive(info) {
+			return requested, info, fmt.Errorf("proxy %s is reachable but Cloudflare trace reports warp=%s", requested.WARPProxy, strings.TrimSpace(info.WARP))
+		}
+		return requested, info, nil
+	case "auto":
+		warp := egressConfig{Mode: "warp", WARPProxy: requested.WARPProxy}
+		if info := queryCloudflareTrace(ctx, warp); warpTraceActive(info) {
+			return warp, info, nil
+		}
+		direct := egressConfig{Mode: "direct", WARPProxy: requested.WARPProxy}
+		return direct, queryCloudflareTrace(ctx, direct), nil
+	default:
+		return requested, egressInfo{}, fmt.Errorf("unsupported egress mode: %s", requested.Mode)
+	}
 }
 
 func (e egressConfig) dialContext(ctx context.Context, network, address string, timeout time.Duration) (net.Conn, error) {

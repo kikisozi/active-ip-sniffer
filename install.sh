@@ -5,6 +5,7 @@ REPO="kikisozi/active-ip-sniffer"
 BRANCH="main"
 APP_DIR="/opt/active-ip-sniffer"
 APP_BIN="${APP_DIR}/active-ip-sniffer"
+WARP_HELPER="${APP_DIR}/warp-helper.sh"
 V_CMD="/usr/local/bin/v"
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -71,14 +72,18 @@ fi
 
 BINARY="dist/active-ip-sniffer-linux-${ARCH}"
 BINARY_URL="https://raw.githubusercontent.com/${REPO}/${REF}/${BINARY}"
+WARP_HELPER_PATH="warp-helper.sh"
+WARP_HELPER_URL="https://raw.githubusercontent.com/${REPO}/${REF}/${WARP_HELPER_PATH}"
 SUMS_URL="https://raw.githubusercontent.com/${REPO}/${REF}/dist/SHA256SUMS"
 TMP_BINARY="$(mktemp)"
+TMP_WARP_HELPER="$(mktemp)"
 TMP_SUMS="$(mktemp)"
 NEW_BINARY="${APP_BIN}.new.$$"
-trap 'rm -f "${TMP_BINARY}" "${TMP_SUMS}" "${NEW_BINARY}"' EXIT INT TERM
+trap 'rm -f "${TMP_BINARY}" "${TMP_WARP_HELPER}" "${TMP_SUMS}" "${NEW_BINARY}"' EXIT INT TERM
 
 echo "下载 Go 单二进制 (${ARCH})..."
 curl -fL --retry 3 --connect-timeout 10 "${BINARY_URL}?cb=${CACHE_BUST}" -o "${TMP_BINARY}"
+curl -fsSL --retry 3 --connect-timeout 10 "${WARP_HELPER_URL}?cb=${CACHE_BUST}" -o "${TMP_WARP_HELPER}"
 curl -fsSL --retry 3 --connect-timeout 10 "${SUMS_URL}?cb=${CACHE_BUST}" -o "${TMP_SUMS}"
 EXPECTED_SHA="$(awk -v file="${BINARY}" '$2 == file {print $1}' "${TMP_SUMS}")"
 ACTUAL_SHA="$(sha256_file "${TMP_BINARY}")"
@@ -86,7 +91,13 @@ if [ -z "${EXPECTED_SHA}" ] || [ "${ACTUAL_SHA}" != "${EXPECTED_SHA}" ]; then
   echo "二进制 SHA256 校验失败，拒绝安装。" >&2
   echo "Expected: ${EXPECTED_SHA:-<missing>}" >&2
   echo "Actual:   ${ACTUAL_SHA}" >&2
-  exit 6
+	exit 6
+fi
+EXPECTED_WARP_SHA="$(awk -v file="${WARP_HELPER_PATH}" '$2 == file {print $1}' "${TMP_SUMS}")"
+ACTUAL_WARP_SHA="$(sha256_file "${TMP_WARP_HELPER}")"
+if [ -z "${EXPECTED_WARP_SHA}" ] || [ "${ACTUAL_WARP_SHA}" != "${EXPECTED_WARP_SHA}" ]; then
+  echo "WARP helper SHA256 校验失败，拒绝安装。" >&2
+  exit 7
 fi
 
 # Do not copy directly over a running executable: some Linux filesystems return
@@ -94,14 +105,21 @@ fi
 cp "${TMP_BINARY}" "${NEW_BINARY}"
 chmod 0755 "${NEW_BINARY}"
 mv -f "${NEW_BINARY}" "${APP_BIN}"
+cp "${TMP_WARP_HELPER}" "${WARP_HELPER}"
+chmod 0755 "${WARP_HELPER}"
 
 cat > "${V_CMD}" <<'EOF'
 #!/bin/sh
 set -eu
 APP="/opt/active-ip-sniffer/active-ip-sniffer"
+WARP_HELPER="/opt/active-ip-sniffer/warp-helper.sh"
 
 if [ "${1:-}" = "probe" ]; then
   exec "$APP" "$@"
+fi
+if [ "${1:-}" = "warp" ]; then
+  shift
+  exec "$WARP_HELPER" "${1:-status}"
 fi
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -118,9 +136,15 @@ chmod 0755 "${V_CMD}"
 echo
 echo "Active IP Sniffer 已部署。以后直接输入 v 即可重新进入配置界面。"
 echo "本地探针：v probe"
+echo "WARP Local Proxy：v warp on（端口 40099）；v warp status；v warp off"
 echo "Binary: ${APP_BIN}"
 echo "Command: ${V_CMD}"
 echo
+
+if [ "${AIS_INSTALL_WARP:-0}" = "1" ]; then
+  echo "按 AIS_INSTALL_WARP=1 启用 WARP Local Proxy 40099..."
+  "${WARP_HELPER}" on || echo "WARP 启用失败；应用 Auto 模式会自动回落 Direct。" >&2
+fi
 
 # curl | sudo sh 时 stdin 属于管道；仅在真实交互终端中自动进入向导。
 if [ -t 1 ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
