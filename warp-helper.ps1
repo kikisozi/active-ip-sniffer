@@ -58,7 +58,7 @@ function Invoke-Warp([string]$Cli, [string[]]$Args) {
 }
 
 function Ensure-Registration([string]$Cli) {
-    & $Cli registration show *> $null
+    & $Cli --accept-tos registration show *> $null
     if ($LASTEXITCODE -eq 0) { return }
     & $Cli --accept-tos registration new *> $null
     if ($LASTEXITCODE -ne 0) {
@@ -93,13 +93,13 @@ function Write-MdmFallback([string]$Cli) {
 }
 
 function Configure-Proxy([string]$Cli) {
-    & $Cli tunnel protocol set MASQUE *> $null
-    & $Cli mode proxy *> $null
+    & $Cli --accept-tos tunnel protocol set MASQUE *> $null
+    & $Cli --accept-tos mode proxy *> $null
     $modeOk = ($LASTEXITCODE -eq 0)
     if ($modeOk) {
-        & $Cli proxy port $Port *> $null
+        & $Cli --accept-tos proxy port $Port *> $null
         if ($LASTEXITCODE -eq 0) { return }
-        & $Cli proxy port set $Port *> $null
+        & $Cli --accept-tos proxy port set $Port *> $null
         if ($LASTEXITCODE -eq 0) { return }
     }
     Write-MdmFallback $Cli
@@ -121,8 +121,8 @@ function Test-Proxy {
 function Show-Status {
     $cli = Find-WarpCli
     if ($cli) {
-        & $cli status 2>$null
-        & $cli settings 2>$null | Select-String -Pattern 'mode|proxy|protocol'
+        & $cli --accept-tos status 2>$null
+        & $cli --accept-tos settings 2>$null | Select-String -Pattern 'mode|proxy|protocol'
     } else { Write-Host "WARP client: not installed" }
     $trace = Get-ProxyTrace
     if ($trace -and $trace -match '(?m)^warp=(on|plus)$') {
@@ -140,7 +140,7 @@ switch ($Action) {
         $cli = Install-Warp
         Ensure-Registration $cli
         Configure-Proxy $cli
-        & $cli connect *> $null
+        & $cli --accept-tos connect *> $null
         if ($LASTEXITCODE -ne 0) { throw "warp-cli connect failed" }
         for ($i=0; $i -lt 15; $i++) {
             if (Test-Proxy) {
@@ -156,7 +156,7 @@ switch ($Action) {
     { $_ -in @("off", "disconnect") } {
         Ensure-Admin
         $cli = Find-WarpCli
-        if ($cli) { & $cli disconnect *> $null }
+        if ($cli) { & $cli --accept-tos disconnect *> $null }
         Remove-Item -Force -ErrorAction SilentlyContinue $ProjectMarker
         Write-Host "WARP disconnected; Active IP Sniffer Auto will use Direct"
     }

@@ -27,7 +27,7 @@ import (
 )
 
 const (
-	version                = "3.5.0"
+	version                = "3.5.1"
 	defaultPort            = 18767
 	maxCandidates          = 32
 	quickBytes       int64 = 1_000_000

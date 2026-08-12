@@ -1,5 +1,10 @@
 # Active IP Sniffer
 
+## v3.5.1：Cloudflare One Client 2026.6 兼容修复
+
+- WARP helper 对 `status/settings/connect/disconnect/mode/proxy/registration` 统一传入 `--accept-tos`，兼容 Cloudflare One Client 2026.6 对非交互式 CLI 的 ToS 检查。
+- Auto 扫描在后台尝试重连已托管 WARP 时同样使用 `warp-cli --accept-tos connect`，避免客户端升级后静默回落 Direct。
+
 一个面向低内存 VPS / Windows 的 Go 单二进制 IP 优选 WebUI。除了原有的流式 TCP 扫描，v3 还整合了 Cloudflare 两阶段直连测速、Top 20 排名、IP 地区/ASN/IDC 展示与缓存、CSV 候选导入、Cloudflare DNS 一键更新，以及不依赖 Xray 的原生 VLESS TLS+WS 端到端测试。
 
 > 仅扫描你拥有或明确获准测试的地址范围。
@@ -172,7 +177,7 @@ v probe
 探针会输出：
 
 ```text
-Active IP Sniffer 3.5.0 local probe: http://127.0.0.1:18767
+Active IP Sniffer 3.5.1 local probe: http://127.0.0.1:18767
 Local probe token: <随机 Token>
 ```
 

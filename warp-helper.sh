@@ -52,7 +52,7 @@ start_service() {
 }
 
 register_warp() {
-  warp-cli registration show >/dev/null 2>&1 && return 0
+  warp-cli --accept-tos registration show >/dev/null 2>&1 && return 0
   warp-cli --accept-tos registration new >/dev/null 2>&1 || warp-cli registration new >/dev/null 2>&1 || fail "WARP 注册失败"
 }
 
@@ -76,9 +76,9 @@ EOF
 }
 
 configure_proxy() {
-  warp-cli tunnel protocol set MASQUE >/dev/null 2>&1 || true
-  if warp-cli mode proxy >/dev/null 2>&1; then
-    if warp-cli proxy port "$PORT" >/dev/null 2>&1 || warp-cli proxy port set "$PORT" >/dev/null 2>&1; then
+  warp-cli --accept-tos tunnel protocol set MASQUE >/dev/null 2>&1 || true
+  if warp-cli --accept-tos mode proxy >/dev/null 2>&1; then
+    if warp-cli --accept-tos proxy port "$PORT" >/dev/null 2>&1 || warp-cli --accept-tos proxy port set "$PORT" >/dev/null 2>&1; then
       return 0
     fi
   fi
@@ -95,8 +95,8 @@ proxy_ok() {
 
 show_status() {
   if command -v warp-cli >/dev/null 2>&1; then
-    warp-cli status 2>/dev/null || true
-    warp-cli settings 2>/dev/null | grep -Ei 'mode|proxy|protocol' || true
+    warp-cli --accept-tos status 2>/dev/null || true
+    warp-cli --accept-tos settings 2>/dev/null | grep -Ei 'mode|proxy|protocol' || true
   else
     say "WARP client: not installed"
   fi
@@ -116,7 +116,7 @@ case "$ACTION" in
     start_service
     register_warp
     configure_proxy
-    warp-cli connect >/dev/null 2>&1 || fail "warp-cli connect 失败"
+    warp-cli --accept-tos connect >/dev/null 2>&1 || fail "warp-cli connect 失败"
     i=0
     while [ "$i" -lt 15 ]; do
       if proxy_ok; then
@@ -134,7 +134,7 @@ case "$ACTION" in
   off|disconnect)
     need_root
     command -v warp-cli >/dev/null 2>&1 || exit 0
-    warp-cli disconnect >/dev/null 2>&1 || true
+    warp-cli --accept-tos disconnect >/dev/null 2>&1 || true
     rm -f "$PROJECT_MARKER"
     say "WARP 已断开；Active IP Sniffer Auto 将使用 Direct"
     ;;

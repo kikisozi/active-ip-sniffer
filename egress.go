@@ -146,7 +146,7 @@ func tryStartInstalledWARP(ctx context.Context) bool {
 	}
 	// Reconnecting an existing, already-configured client is safe and does not
 	// alter the machine's default route when the client is in Local Proxy mode.
-	return exec.CommandContext(commandCtx, "warp-cli", "connect").Run() == nil
+	return exec.CommandContext(commandCtx, "warp-cli", "--accept-tos", "connect").Run() == nil
 }
 
 func (e egressConfig) dialContext(ctx context.Context, network, address string, timeout time.Duration) (net.Conn, error) {
