@@ -30,7 +30,7 @@ func TestRankCFResults(t *testing.T) {
 		{IP: "192.0.2.3", Status: "ok", AverageMbps: 100, PeakMbps: 90, TTFBMS: 400},
 	}
 	ranked := rankCFResults(values)
-	if len(ranked) != 3 || ranked[0].IP != "192.0.2.3" || ranked[1].IP != "192.0.2.1" || ranked[2].IP != "192.0.2.2" {
+	if len(ranked) != 3 || ranked[0].IP != "192.0.2.1" || ranked[1].IP != "192.0.2.3" || ranked[2].IP != "192.0.2.2" {
 		t.Fatalf("unexpected rank order: %#v", ranked)
 	}
 	for i := range ranked {
@@ -43,13 +43,13 @@ func TestRankCFResults(t *testing.T) {
 func TestRankCFResultsCapsAt20(t *testing.T) {
 	values := make([]cfSpeedResult, 0, 25)
 	for i := 0; i < 25; i++ {
-		values = append(values, cfSpeedResult{IP: "192.0.2.1", Port: 443, Status: "ok", AverageMbps: float64(i)})
+		values = append(values, cfSpeedResult{IP: "192.0.2.1", Port: 443, Status: "ok", AverageMbps: float64(i), PeakMbps: float64(i)})
 	}
 	ranked := rankCFResults(values)
 	if got := len(ranked); got != cfSpeedTopLimit {
 		t.Fatalf("len=%d, want %d", got, cfSpeedTopLimit)
 	}
-	if ranked[0].AverageMbps != 24 || ranked[len(ranked)-1].AverageMbps != 5 {
+	if ranked[0].PeakMbps != 24 || ranked[len(ranked)-1].PeakMbps != 5 {
 		t.Fatalf("unexpected retained speed range: first=%.1f last=%.1f", ranked[0].AverageMbps, ranked[len(ranked)-1].AverageMbps)
 	}
 }
@@ -68,7 +68,7 @@ func TestCFSpeedJobKeepsOnlyCurrentTop20(t *testing.T) {
 	if len(job.results) != cfSpeedTopLimit {
 		t.Fatalf("job retained %d results, want %d", len(job.results), cfSpeedTopLimit)
 	}
-	if job.results[0].AverageMbps != 34 || job.results[len(job.results)-1].AverageMbps != 15 {
+	if job.results[0].PeakMbps != 44 || job.results[len(job.results)-1].PeakMbps != 25 {
 		t.Fatalf("unexpected retained results: first=%.1f last=%.1f", job.results[0].AverageMbps, job.results[len(job.results)-1].AverageMbps)
 	}
 }

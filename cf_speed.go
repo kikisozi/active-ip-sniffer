@@ -23,11 +23,15 @@ import (
 )
 
 const (
-	cfSpeedBytes          int64  = 99_999_999
+	cfQuickBytes          int64  = 1_000_000
+	cfQuickTimeout               = 2 * time.Second
+	cfSpeedBytes          int64  = 80_000_000
 	cfSpeedTopLimit              = 20
 	cfSpeedMaxInput       uint64 = 2_000_000
 	cfSpeedDefaultWorkers        = 64
 	cfSpeedMaxWorkers            = 256
+	cfQuickDefaultWorkers        = 4
+	cfQuickMaxWorkers            = 8
 	cfSpeedWindow                = 250 * time.Millisecond
 )
 
@@ -47,15 +51,16 @@ type benchEndpoint struct {
 }
 
 type ipMetadata struct {
-	IP      string `json:"ip"`
-	Country string `json:"country,omitempty"`
-	Region  string `json:"region,omitempty"`
-	City    string `json:"city,omitempty"`
-	ASN     int    `json:"asn,omitempty"`
-	Org     string `json:"org,omitempty"`
-	ISP     string `json:"isp,omitempty"`
-	IDC     string `json:"idc,omitempty"`
-	Source  string `json:"source,omitempty"`
+	IP          string `json:"ip"`
+	Country     string `json:"country,omitempty"`
+	CountryCode string `json:"country_code,omitempty"`
+	Region      string `json:"region,omitempty"`
+	City        string `json:"city,omitempty"`
+	ASN         int    `json:"asn,omitempty"`
+	Org         string `json:"org,omitempty"`
+	ISP         string `json:"isp,omitempty"`
+	IDC         string `json:"idc,omitempty"`
+	Source      string `json:"source,omitempty"`
 }
 
 type cfSpeedResult struct {
@@ -80,10 +85,12 @@ type cfSpeedResult struct {
 }
 
 type cfSpeedStartRequest struct {
-	Targets []string `json:"targets"`
-	Port    int      `json:"port"`
-	Timeout float64  `json:"timeout"`
-	Workers int      `json:"workers"`
+	Targets      []string              `json:"targets"`
+	Port         int                   `json:"port"`
+	Timeout      float64               `json:"timeout"`
+	Workers      int                   `json:"workers"`
+	QuickWorkers int                   `json:"quick_workers"`
+	Metadata     map[string]ipMetadata `json:"metadata,omitempty"`
 }
 
 type cfSpeedJob struct {
@@ -94,6 +101,8 @@ type cfSpeedJob struct {
 	total     uint64
 
 	prefilterDone atomic.Uint64
+	quickDone     atomic.Uint64
+	quickPassed   atomic.Uint64
 	downloadDone  atomic.Uint64
 	passed        atomic.Uint64
 	failed        atomic.Uint64
@@ -133,11 +142,11 @@ func rankCFResults(values []cfSpeedResult) []cfSpeedResult {
 		if (a.Status == "ok") != (b.Status == "ok") {
 			return a.Status == "ok"
 		}
-		if a.AverageMbps != b.AverageMbps {
-			return a.AverageMbps > b.AverageMbps
-		}
 		if a.PeakMbps != b.PeakMbps {
 			return a.PeakMbps > b.PeakMbps
+		}
+		if a.AverageMbps != b.AverageMbps {
+			return a.AverageMbps > b.AverageMbps
 		}
 		if a.TTFBMS != b.TTFBMS {
 			return a.TTFBMS < b.TTFBMS
@@ -174,19 +183,23 @@ func (j *cfSpeedJob) snapshot() map[string]any {
 		}
 	}
 	return map[string]any{
-		"id":             j.id,
-		"status":         status,
-		"phase":          phase,
-		"message":        message,
-		"input_total":    j.total,
-		"prefilter_done": j.prefilterDone.Load(),
-		"selected":       selected,
-		"download_done":  j.downloadDone.Load(),
-		"passed":         j.passed.Load(),
-		"failed":         j.failed.Load(),
-		"top20_passed":   passed,
-		"download_bytes": cfSpeedBytes,
-		"results":        results,
+		"id":              j.id,
+		"status":          status,
+		"phase":           phase,
+		"message":         message,
+		"input_total":     j.total,
+		"prefilter_done":  j.prefilterDone.Load(),
+		"quick_done":      j.quickDone.Load(),
+		"quick_passed":    j.quickPassed.Load(),
+		"selected":        selected,
+		"download_done":   j.downloadDone.Load(),
+		"passed":          j.passed.Load(),
+		"failed":          j.failed.Load(),
+		"top20_passed":    passed,
+		"quick_bytes":     cfQuickBytes,
+		"quick_timeout_s": cfQuickTimeout.Seconds(),
+		"download_bytes":  cfSpeedBytes,
+		"results":         results,
 	}
 }
 
@@ -391,6 +404,99 @@ func readBenchEndpoint(line string) (benchEndpoint, error) {
 	return benchEndpoint{IP: parts[0], Port: port}, nil
 }
 
+func quickFilterCFSpeedEndpoints(job *cfSpeedJob, spoolPath string, inputCount, workers int) (string, int, error) {
+	job.setState("running", "quick", fmt.Sprintf("1 MB / %.0fs quick screening %d TCP-reachable endpoint(s)", cfQuickTimeout.Seconds(), inputCount))
+	in, err := os.Open(spoolPath)
+	if err != nil {
+		return "", 0, fmt.Errorf("open CF quick-filter input: %w", err)
+	}
+	defer in.Close()
+	out, err := os.CreateTemp("", "active-ip-sniffer-cf-quick-*.csv")
+	if err != nil {
+		return "", 0, fmt.Errorf("create CF quick-filter spool: %w", err)
+	}
+	outPath := out.Name()
+	cleanupOnError := func(err error) (string, int, error) {
+		_ = out.Close()
+		_ = os.Remove(outPath)
+		return "", 0, err
+	}
+
+	workers = clampInt(workers, 1, cfQuickMaxWorkers, cfQuickDefaultWorkers)
+	tasks := make(chan benchEndpoint, workers*2)
+	passed := make(chan benchEndpoint, workers*2)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			for endpoint := range tasks {
+				if job.ctx.Err() != nil {
+					return
+				}
+				ctx, cancel := context.WithTimeout(job.ctx, cfQuickTimeout)
+				result := runDirectCFSpeed(ctx, endpoint, cfQuickBytes)
+				cancel()
+				job.quickDone.Add(1)
+				if result.Status != "ok" {
+					job.failed.Add(1)
+					continue
+				}
+				job.quickPassed.Add(1)
+				select {
+				case <-job.ctx.Done():
+					return
+				case passed <- endpoint:
+				}
+			}
+		}()
+	}
+
+	go func() {
+		scanner := bufio.NewScanner(in)
+		for scanner.Scan() {
+			endpoint, parseErr := readBenchEndpoint(scanner.Text())
+			if parseErr != nil {
+				job.quickDone.Add(1)
+				job.failed.Add(1)
+				continue
+			}
+			select {
+			case <-job.ctx.Done():
+				close(tasks)
+				return
+			case tasks <- endpoint:
+			}
+		}
+		close(tasks)
+	}()
+	go func() {
+		wg.Wait()
+		close(passed)
+	}()
+
+	writer := bufio.NewWriterSize(out, 64*1024)
+	passedCount := 0
+	for endpoint := range passed {
+		if _, err := fmt.Fprintf(writer, "%s,%d\n", endpoint.IP, endpoint.Port); err != nil {
+			return cleanupOnError(fmt.Errorf("write CF quick-filter spool: %w", err))
+		}
+		passedCount++
+	}
+	if err := writer.Flush(); err != nil {
+		return cleanupOnError(fmt.Errorf("flush CF quick-filter spool: %w", err))
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(outPath)
+		return "", 0, fmt.Errorf("close CF quick-filter spool: %w", err)
+	}
+	if job.ctx.Err() != nil {
+		_ = os.Remove(outPath)
+		return "", 0, job.ctx.Err()
+	}
+	return outPath, passedCount, nil
+}
+
 type speedTraceTimes struct {
 	connectStart time.Time
 	connectDone  time.Time
@@ -399,7 +505,7 @@ type speedTraceTimes struct {
 	firstByte    time.Time
 }
 
-func runDirectCFSpeed(ctx context.Context, endpoint benchEndpoint) cfSpeedResult {
+func runDirectCFSpeed(ctx context.Context, endpoint benchEndpoint, bytesWanted int64) cfSpeedResult {
 	result := cfSpeedResult{IP: endpoint.IP, Port: endpoint.Port, Status: "failed"}
 	requestStart := time.Now()
 	traceTimes := &speedTraceTimes{}
@@ -427,7 +533,7 @@ func runDirectCFSpeed(ctx context.Context, endpoint benchEndpoint) cfSpeedResult
 	if endpoint.Port != 443 {
 		host += ":" + strconv.Itoa(endpoint.Port)
 	}
-	requestURL := "https://" + host + "/__down?bytes=" + strconv.FormatInt(cfSpeedBytes, 10)
+	requestURL := "https://" + host + "/__down?bytes=" + strconv.FormatInt(bytesWanted, 10)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
 		result.Error = err.Error()
@@ -499,13 +605,13 @@ func runDirectCFSpeed(ctx context.Context, endpoint benchEndpoint) cfSpeedResult
 	result.PeakMbps = roundFloat(peak, 1)
 	result.AverageMbps = roundFloat(bitsPerSecondMbps(total, transferElapsed), 1)
 	result.EffectiveMbps = roundFloat(bitsPerSecondMbps(total, finish.Sub(requestStart)), 1)
-	if result.Error == "" && total == cfSpeedBytes {
+	if result.Error == "" && total == bytesWanted {
 		result.Status = "ok"
 		return result
 	}
 	if result.Error == "" {
 		result.FailureStage = "download"
-		result.Error = fmt.Sprintf("downloaded %d bytes, expected %d", total, cfSpeedBytes)
+		result.Error = fmt.Sprintf("downloaded %d bytes, expected %d", total, bytesWanted)
 	}
 	return result
 }
@@ -536,7 +642,7 @@ func inferSpeedFailureStage(trace *speedTraceTimes) string {
 	return "download"
 }
 
-func executeCFSpeedJob(job *cfSpeedJob, ranges []benchEndpointRange, total uint64, workers int, tcpTimeout time.Duration) {
+func executeCFSpeedJob(job *cfSpeedJob, ranges []benchEndpointRange, total uint64, workers, quickWorkers int, tcpTimeout time.Duration) {
 	spoolPath, reachableCount, err := prefilterCFSpeedEndpoints(job, ranges, total, workers, tcpTimeout)
 	if err != nil {
 		if job.ctx.Err() != nil {
@@ -551,13 +657,27 @@ func executeCFSpeedJob(job *cfSpeedJob, ranges []benchEndpointRange, total uint6
 		job.setState("cancelled", "cancelled", "CF speed test cancelled")
 		return
 	}
-	job.setSelected(reachableCount)
 	if reachableCount == 0 {
 		job.setState("complete", "complete", "No TCP-reachable candidate survived the prefilter")
 		return
 	}
-	job.setState("running", "download", fmt.Sprintf("Testing all %d TCP-reachable candidate(s), one %.1f MB download each; retaining Top %d", reachableCount, float64(cfSpeedBytes)/1_000_000, cfSpeedTopLimit))
-	spool, err := os.Open(spoolPath)
+	quickPath, quickPassed, err := quickFilterCFSpeedEndpoints(job, spoolPath, reachableCount, quickWorkers)
+	if err != nil {
+		if job.ctx.Err() != nil {
+			job.setState("cancelled", "cancelled", "CF speed test cancelled")
+		} else {
+			job.setState("failed", "failed", err.Error())
+		}
+		return
+	}
+	defer os.Remove(quickPath)
+	job.setSelected(quickPassed)
+	if quickPassed == 0 {
+		job.setState("complete", "complete", "No endpoint completed the 1 MB quick screen within 2 seconds")
+		return
+	}
+	job.setState("running", "download", fmt.Sprintf("%d endpoint(s) survived 1 MB / 2s screening; running one %.0f MB precision test each; ranking by peak speed", quickPassed, float64(cfSpeedBytes)/1_000_000))
+	spool, err := os.Open(quickPath)
 	if err != nil {
 		job.setState("failed", "failed", "open CF prefilter spool: "+err.Error())
 		return
@@ -576,8 +696,11 @@ func executeCFSpeedJob(job *cfSpeedJob, ranges []benchEndpointRange, total uint6
 			continue
 		}
 		ctx, cancel := context.WithTimeout(job.ctx, 180*time.Second)
-		result := runDirectCFSpeed(ctx, endpoint)
+		result := runDirectCFSpeed(ctx, endpoint, cfSpeedBytes)
 		cancel()
+		if meta, ok := cachedIPMetadata(endpoint.IP); ok {
+			result.Meta = meta
+		}
 		job.addResult(result)
 		job.downloadDone.Add(1)
 		if result.Status == "ok" {
@@ -613,7 +736,7 @@ func handleCFSpeedStart(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 512_000)
+	r.Body = http.MaxBytesReader(w, r.Body, 12<<20)
 	defer r.Body.Close()
 	var request cfSpeedStartRequest
 	decoder := json.NewDecoder(r.Body)
@@ -631,20 +754,30 @@ func handleCFSpeedStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	workers := clampInt(request.Workers, 1, cfSpeedMaxWorkers, cfSpeedDefaultWorkers)
+	quickWorkers := clampInt(request.QuickWorkers, 1, cfQuickMaxWorkers, cfQuickDefaultWorkers)
 	tcpTimeoutSeconds := clampFloat(request.Timeout, 0.2, 5, 1.5)
 	tcpTimeout := time.Duration(tcpTimeoutSeconds * float64(time.Second))
 	cfSpeedJobs.cleanupOld(time.Now())
 	ctx, cancel := context.WithCancel(context.Background())
+	for ip, meta := range request.Metadata {
+		if meta.IP == "" {
+			meta.IP = ip
+		}
+		seedIPMetadata(meta, metadataImportedTTL)
+	}
 	job := &cfSpeedJob{id: newJobID(), startedAt: time.Now(), ctx: ctx, cancel: cancel, total: total, status: "queued", phase: "queued"}
 	cfSpeedJobs.put(job)
-	go executeCFSpeedJob(job, ranges, total, workers, tcpTimeout)
+	go executeCFSpeedJob(job, ranges, total, workers, quickWorkers, tcpTimeout)
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"id":                job.id,
 		"input_total":       total,
 		"top_limit":         cfSpeedTopLimit,
+		"quick_bytes":       cfQuickBytes,
+		"quick_timeout_s":   cfQuickTimeout.Seconds(),
 		"download_bytes":    cfSpeedBytes,
 		"default_port":      request.Port,
 		"prefilter_workers": workers,
+		"quick_workers":     quickWorkers,
 	})
 }
 
@@ -685,115 +818,14 @@ func handleCFSpeedExportCSV(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", "cf-direct-speed-"+time.Now().Format("20060102-150405")+".csv"))
 	writer := csv.NewWriter(w)
-	_ = writer.Write([]string{"rank", "ip", "port", "country", "region", "city", "asn", "org", "isp", "tcp_ms", "tls_handshake_ms", "tls_complete_ms", "ttfb_ms", "average_mbps", "effective_mbps", "peak_mbps", "transfer_seconds", "total_seconds", "downloaded_bytes", "http_status", "status", "failure_stage", "error"})
+	_ = writer.Write([]string{"rank", "ip", "port", "country_code", "country", "region", "city", "asn", "idc", "org", "isp", "metadata_source", "tcp_ms", "tls_handshake_ms", "tls_complete_ms", "ttfb_ms", "average_mbps", "effective_mbps", "peak_mbps", "transfer_seconds", "total_seconds", "downloaded_bytes", "http_status", "status", "failure_stage", "error"})
 	for _, item := range results {
 		_ = writer.Write([]string{
-			strconv.Itoa(item.Rank), item.IP, strconv.Itoa(item.Port), item.Meta.Country, item.Meta.Region, item.Meta.City, strconv.Itoa(item.Meta.ASN), item.Meta.Org, item.Meta.ISP,
+			strconv.Itoa(item.Rank), item.IP, strconv.Itoa(item.Port), item.Meta.CountryCode, item.Meta.Country, item.Meta.Region, item.Meta.City, strconv.Itoa(item.Meta.ASN), item.Meta.IDC, item.Meta.Org, item.Meta.ISP, item.Meta.Source,
 			fmt.Sprintf("%.1f", item.TCPMS), fmt.Sprintf("%.1f", item.TLSHandshakeMS), fmt.Sprintf("%.1f", item.TLSCompleteMS), fmt.Sprintf("%.1f", item.TTFBMS),
 			fmt.Sprintf("%.1f", item.AverageMbps), fmt.Sprintf("%.1f", item.EffectiveMbps), fmt.Sprintf("%.1f", item.PeakMbps), fmt.Sprintf("%.3f", item.TransferSeconds), fmt.Sprintf("%.3f", item.TotalSeconds),
 			strconv.FormatInt(item.DownloadedBytes, 10), strconv.Itoa(item.HTTPStatus), item.Status, item.FailureStage, item.Error,
 		})
 	}
 	writer.Flush()
-}
-
-type ipMetadataCacheEntry struct {
-	value     ipMetadata
-	expiresAt time.Time
-}
-
-var ipMetadataCache = struct {
-	sync.RWMutex
-	items map[string]ipMetadataCacheEntry
-}{items: make(map[string]ipMetadataCacheEntry)}
-
-func lookupIPMetadata(ctx context.Context, ip string) ipMetadata {
-	base := ipMetadata{IP: ip}
-	parsed := net.ParseIP(ip)
-	if parsed == nil || parsed.To4() == nil || parsed.IsPrivate() || parsed.IsLoopback() {
-		return base
-	}
-	now := time.Now()
-	ipMetadataCache.RLock()
-	entry, ok := ipMetadataCache.items[ip]
-	ipMetadataCache.RUnlock()
-	if ok && entry.expiresAt.After(now) {
-		return entry.value
-	}
-	type response struct {
-		Success    bool   `json:"success"`
-		Country    string `json:"country"`
-		Region     string `json:"region"`
-		City       string `json:"city"`
-		Message    string `json:"message"`
-		Connection struct {
-			ASN int    `json:"asn"`
-			Org string `json:"org"`
-			ISP string `json:"isp"`
-		} `json:"connection"`
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://ipwho.is/"+ip, nil)
-	if err != nil {
-		return base
-	}
-	req.Header.Set("User-Agent", "Active-IP-Sniffer/"+appVersion)
-	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
-	if err != nil {
-		return base
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return base
-	}
-	var decoded response
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 128<<10)).Decode(&decoded); err != nil || !decoded.Success {
-		return base
-	}
-	base.Country = decoded.Country
-	base.Region = decoded.Region
-	base.City = decoded.City
-	base.ASN = decoded.Connection.ASN
-	base.Org = decoded.Connection.Org
-	base.ISP = decoded.Connection.ISP
-	base.IDC = decoded.Connection.Org
-	if base.IDC == "" {
-		base.IDC = decoded.Connection.ISP
-	}
-	base.Source = "ipwho.is"
-	ipMetadataCache.Lock()
-	ipMetadataCache.items[ip] = ipMetadataCacheEntry{value: base, expiresAt: now.Add(24 * time.Hour)}
-	ipMetadataCache.Unlock()
-	return base
-}
-
-func handleIPMetadata(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
-		return
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, 64_000)
-	defer r.Body.Close()
-	var request struct {
-		IPs []string `json:"ips"`
-	}
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&request); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request: " + err.Error()})
-		return
-	}
-	seen := make(map[string]struct{})
-	values := make([]ipMetadata, 0, len(request.IPs))
-	for _, raw := range request.IPs {
-		ip := strings.TrimSpace(raw)
-		if _, ok := seen[ip]; ok || net.ParseIP(ip) == nil {
-			continue
-		}
-		seen[ip] = struct{}{}
-		if len(values) >= 100 {
-			break
-		}
-		values = append(values, lookupIPMetadata(r.Context(), ip))
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": values})
 }

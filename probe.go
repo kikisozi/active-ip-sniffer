@@ -107,6 +107,7 @@ func runProbeServer(host string, port int, token string) error {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return fmt.Errorf("create probe data directory: %w", err)
 	}
+	configureIPMetadataCache(dataDir)
 	cleanupResultDirectory(dataDir, time.Now())
 	application := &app{store: newJobStore(), dataDir: dataDir}
 	address := net.JoinHostPort(host, strconv.Itoa(port))

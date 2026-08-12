@@ -24,7 +24,7 @@ import (
 )
 
 const (
-	appVersion        = "3.1.0"
+	appVersion        = "3.3.0"
 	maxPorts          = 32
 	maxAttempts       = uint64(2_000_000)
 	maxWorkers        = 512
@@ -596,6 +596,8 @@ func (a *app) handleInfo(w http.ResponseWriter, _ *http.Request) {
 		"version":             appVersion,
 		"runtime":             "go",
 		"recent_result_limit": recentResultLimit,
+		"cf_quick_bytes":      cfQuickBytes,
+		"cf_quick_timeout_s":  cfQuickTimeout.Seconds(),
 		"cf_speed_bytes":      cfSpeedBytes,
 		"cf_top_limit":        cfSpeedTopLimit,
 		"cf_https_ports":      []int{443, 2053, 2083, 2087, 2096, 8443},
@@ -720,6 +722,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("/api/cloudflare/config", a.handleCloudflareConfig)
 	mux.HandleFunc("/api/cloudflare/update", a.handleCloudflareUpdate)
 	mux.HandleFunc("/api/ip/meta", handleIPMetadata)
+	mux.HandleFunc("/api/candidates/import", handleCandidateCSVImport)
 	return a.authMiddleware(mux)
 }
 
@@ -763,6 +766,7 @@ func runServer(host string, port int, dataDir, configPath string) error {
 	if err := os.MkdirAll(dataDir, 0o750); err != nil {
 		return fmt.Errorf("create data directory: %w", err)
 	}
+	configureIPMetadataCache(dataDir)
 	cleanupResultDirectory(dataDir, time.Now())
 	settings, err := newSettingsStore(configPath)
 	if err != nil {
