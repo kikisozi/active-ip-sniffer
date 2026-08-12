@@ -74,7 +74,8 @@ BINARY_URL="https://raw.githubusercontent.com/${REPO}/${REF}/${BINARY}"
 SUMS_URL="https://raw.githubusercontent.com/${REPO}/${REF}/dist/SHA256SUMS"
 TMP_BINARY="$(mktemp)"
 TMP_SUMS="$(mktemp)"
-trap 'rm -f "${TMP_BINARY}" "${TMP_SUMS}"' EXIT INT TERM
+NEW_BINARY="${APP_BIN}.new.$$"
+trap 'rm -f "${TMP_BINARY}" "${TMP_SUMS}" "${NEW_BINARY}"' EXIT INT TERM
 
 echo "下载 Go 单二进制 (${ARCH})..."
 curl -fL --retry 3 --connect-timeout 10 "${BINARY_URL}?cb=${CACHE_BUST}" -o "${TMP_BINARY}"
@@ -88,8 +89,11 @@ if [ -z "${EXPECTED_SHA}" ] || [ "${ACTUAL_SHA}" != "${EXPECTED_SHA}" ]; then
   exit 6
 fi
 
-cp "${TMP_BINARY}" "${APP_BIN}"
-chmod 0755 "${APP_BIN}"
+# Do not copy directly over a running executable: some Linux filesystems return
+# ETXTBSY. Stage the new file beside the target and atomically rename it.
+cp "${TMP_BINARY}" "${NEW_BINARY}"
+chmod 0755 "${NEW_BINARY}"
+mv -f "${NEW_BINARY}" "${APP_BIN}"
 
 cat > "${V_CMD}" <<'EOF'
 #!/bin/sh
