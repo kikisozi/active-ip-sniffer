@@ -24,7 +24,7 @@ import (
 )
 
 const (
-	appVersion        = "3.5.3"
+	appVersion        = "3.6.1"
 	maxPorts          = 32
 	maxAttempts       = uint64(2_000_000)
 	maxWorkers        = 512
@@ -201,6 +201,7 @@ type app struct {
 	dataDir  string
 	settings *settingsStore
 	public   *publicBenchmarkStore
+	cfcdn    *cfCDNMonitor
 }
 
 type startRequest struct {
@@ -750,6 +751,9 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("/api/cf-speed/export.csv", handleCFSpeedExportCSV)
 	mux.HandleFunc("/api/cloudflare/config", a.handleCloudflareConfig)
 	mux.HandleFunc("/api/cloudflare/update", a.handleCloudflareUpdate)
+	mux.HandleFunc("/api/cfcdn/config", a.handleCFCDNConfig)
+	mux.HandleFunc("/api/cfcdn/update", a.handleCFCDNUpdate)
+	mux.HandleFunc("/api/cfcdn/check", a.handleCFCDNCheck)
 	mux.HandleFunc("/api/ip/meta", handleIPMetadata)
 	mux.HandleFunc("/api/candidates/import", handleCandidateCSVImport)
 	mux.HandleFunc("/api/public/publish", a.handlePublicPublish)
@@ -809,7 +813,9 @@ func runServer(host string, port int, dataDir, configPath string) error {
 		return fmt.Errorf("load config %s: %w", configPath, err)
 	}
 	application := &app{store: newJobStore(), dataDir: dataDir, settings: settings, public: newPublicBenchmarkStore(dataDir)}
+	application.cfcdn = newCFCDNMonitor(settings)
 	cleanupStop := make(chan struct{})
+	application.cfcdn.start(cleanupStop)
 	go func() {
 		ticker := time.NewTicker(time.Hour)
 		defer ticker.Stop()

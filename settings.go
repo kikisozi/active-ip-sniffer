@@ -83,6 +83,8 @@ type persistedConfig struct {
 	Auth          authSettings       `json:"auth,omitempty"`
 	Cloudflare    cloudflareSettings `json:"cloudflare"`
 	DNSPod        dnsPodSettings     `json:"dnspod,omitempty"`
+	SavedVLESS    []string           `json:"saved_vless,omitempty"`
+	CFCDN         cfCDNSettings      `json:"cfcdn,omitempty"`
 }
 
 func defaultPersistedConfig() persistedConfig {
@@ -165,6 +167,7 @@ func loadPersistedConfig(path string) (persistedConfig, error) {
 	}
 	cfg.Cloudflare.Domains = normalizeDomainList(cfg.Cloudflare.Domains)
 	cfg.DNSPod = normalizeDNSPodSettings(cfg.DNSPod)
+	cfg.CFCDN = normalizeCFCDNSettings(cfg.CFCDN)
 	return cfg, nil
 }
 
@@ -210,6 +213,8 @@ func (s *settingsStore) snapshot() persistedConfig {
 	defer s.mu.RUnlock()
 	cfg := s.cfg
 	cfg.Cloudflare.Domains = append([]string(nil), cfg.Cloudflare.Domains...)
+	cfg.SavedVLESS = append([]string(nil), cfg.SavedVLESS...)
+	cfg.CFCDN = cloneCFCDNSettings(cfg.CFCDN)
 	return cfg
 }
 
