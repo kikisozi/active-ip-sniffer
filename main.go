@@ -24,7 +24,7 @@ import (
 )
 
 const (
-	appVersion        = "3.5.2"
+	appVersion        = "3.5.3"
 	maxPorts          = 32
 	maxAttempts       = uint64(2_000_000)
 	maxWorkers        = 512

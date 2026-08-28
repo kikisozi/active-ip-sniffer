@@ -1,5 +1,11 @@
 # Active IP Sniffer
 
+## v3.5.3：CF Direct 全部可用结果导出
+
+- CF Direct 页面仍按原规则展示 Top 20，不改变发布候选和 Top 20 → VLESS 行为。
+- 精测阶段额外保留当前任务中全部成功（status=ok）可用结果；导出区可选择“当前 Top20 筛选”或“全部可用 IP”。
+- “全部可用 IP”CSV 使用相同的峰值 → 平均 → TTFB → TCP 排名并生成连续 rank。
+
 ## v3.5.2：用户探针与候选管理修复
 
 - 修复 Windows PowerShell 用户探针脚本把查询参数误解析成 GitHub commit SHA 的问题。
@@ -184,7 +190,7 @@ v probe
 探针会输出：
 
 ```text
-Active IP Sniffer 3.5.2 local probe: http://127.0.0.1:18767
+Active IP Sniffer 3.5.3 local probe: http://127.0.0.1:18767
 Local probe token: <随机 Token>
 ```
 

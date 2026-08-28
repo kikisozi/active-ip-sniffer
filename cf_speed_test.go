@@ -66,10 +66,20 @@ func TestCFSpeedJobKeepsOnlyCurrentTop20(t *testing.T) {
 		})
 	}
 	if len(job.results) != cfSpeedTopLimit {
-		t.Fatalf("job retained %d results, want %d", len(job.results), cfSpeedTopLimit)
+		t.Fatalf("job retained %d top results, want %d", len(job.results), cfSpeedTopLimit)
+	}
+	if len(job.usable) != 35 {
+		t.Fatalf("job retained %d usable results, want 35", len(job.usable))
 	}
 	if job.results[0].PeakMbps != 44 || job.results[len(job.results)-1].PeakMbps != 25 {
 		t.Fatalf("unexpected retained results: first=%.1f last=%.1f", job.results[0].AverageMbps, job.results[len(job.results)-1].AverageMbps)
+	}
+	all := job.exportResults("usable")
+	if len(all) != 35 || all[0].PeakMbps != 44 || all[len(all)-1].PeakMbps != 10 {
+		t.Fatalf("unexpected usable export: len=%d first=%.1f last=%.1f", len(all), all[0].PeakMbps, all[len(all)-1].PeakMbps)
+	}
+	if top := job.exportResults("top20"); len(top) != cfSpeedTopLimit {
+		t.Fatalf("top export len=%d", len(top))
 	}
 }
 

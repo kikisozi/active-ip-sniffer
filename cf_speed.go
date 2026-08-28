@@ -121,6 +121,7 @@ type cfSpeedJob struct {
 	message       string
 	selectedCount int
 	results       []cfSpeedResult
+	usable        []cfSpeedResult
 }
 
 func (j *cfSpeedJob) setState(status, phase, message string) {
@@ -140,10 +141,13 @@ func (j *cfSpeedJob) setSelected(count int) {
 func (j *cfSpeedJob) addResult(result cfSpeedResult) {
 	j.mu.Lock()
 	j.results = rankCFResults(append(j.results, result))
+	if result.Status == "ok" {
+		j.usable = append(j.usable, result)
+	}
 	j.mu.Unlock()
 }
 
-func rankCFResults(values []cfSpeedResult) []cfSpeedResult {
+func rankCFResultsAll(values []cfSpeedResult) []cfSpeedResult {
 	result := append([]cfSpeedResult(nil), values...)
 	sort.SliceStable(result, func(i, j int) bool {
 		a, b := result[i], result[j]
@@ -167,13 +171,27 @@ func rankCFResults(values []cfSpeedResult) []cfSpeedResult {
 		}
 		return a.Port < b.Port
 	})
-	if len(result) > cfSpeedTopLimit {
-		result = result[:cfSpeedTopLimit]
-	}
 	for i := range result {
 		result[i].Rank = i + 1
 	}
 	return result
+}
+
+func rankCFResults(values []cfSpeedResult) []cfSpeedResult {
+	result := rankCFResultsAll(values)
+	if len(result) > cfSpeedTopLimit {
+		result = result[:cfSpeedTopLimit]
+	}
+	return result
+}
+
+func (j *cfSpeedJob) exportResults(scope string) []cfSpeedResult {
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	if strings.EqualFold(strings.TrimSpace(scope), "usable") {
+		return rankCFResultsAll(j.usable)
+	}
+	return rankCFResults(j.results)
 }
 
 func (j *cfSpeedJob) snapshot() map[string]any {
@@ -183,6 +201,7 @@ func (j *cfSpeedJob) snapshot() map[string]any {
 	message := j.message
 	selected := j.selectedCount
 	results := rankCFResults(j.results)
+	usableCount := len(j.usable)
 	j.mu.RUnlock()
 	passed := 0
 	for _, item := range results {
@@ -204,6 +223,7 @@ func (j *cfSpeedJob) snapshot() map[string]any {
 		"passed":              j.passed.Load(),
 		"failed":              j.failed.Load(),
 		"top20_passed":        passed,
+		"usable_count":        usableCount,
 		"quick_bytes":         cfQuickBytes,
 		"quick_timeout_s":     cfQuickTimeout.Seconds(),
 		"download_bytes":      j.precisionBytes,
@@ -855,9 +875,7 @@ func handleCFSpeedExportCSV(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "CF speed job not found"})
 		return
 	}
-	job.mu.RLock()
-	results := rankCFResults(job.results)
-	job.mu.RUnlock()
+	results := job.exportResults(r.URL.Query().Get("scope"))
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", "cf-direct-speed-"+time.Now().Format("20060102-150405")+".csv"))
